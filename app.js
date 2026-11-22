@@ -267,6 +267,7 @@ function telaNotas() {
     <header class="top"><div><h1>Notas</h1><p class="sub">${plural(compras.length, 'compra registrada', 'compras registradas')}</p></div></header>
     <div class="acoes" style="padding-top:0;padding-bottom:16px">
       <button class="btn primary" type="button" data-act="ler-nota">Ler QR Code da nota fiscal</button>
+      <button class="btn ghost" type="button" data-act="colar-nota">Colar nota (Atalho)</button>
       <button class="btn ghost" type="button" data-act="foto-nota">Fotografar a nota</button>
     </div>
     ${lista}`;
@@ -398,7 +399,72 @@ async function processarQRNota(texto) {
     } catch (e) { console.warn('consulta da nota', e); }
     fecharSheet();
   }
-  abrirFotoNota(info);
+  abrirValidarNota(info);
+}
+
+/* nota aberta para você validar (SEF/SC pede validação de pessoa) e trazida pelo Atalho "Enviar para Despensa" */
+let notaAberta = null; // info da nota aberta para validar
+
+function abrirValidarNota(info) {
+  notaAberta = info;
+  abrirSheet(`
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <h2>Validar a nota</h2>
+      <ol class="dicas">
+        <li>Toque em <strong>Abrir a nota</strong> e depois em <strong>Validar</strong>, na tela da Fazenda.</li>
+        <li>Com a nota aberta, toque em <strong>Compartilhar › Enviar para Despensa</strong>.</li>
+        <li>Feche a nota e toque em <strong>Colar nota</strong>.</li>
+      </ol>
+      <div class="sheet-acoes">
+        <a class="btn primary" href="${esc(info.url)}" target="_blank" rel="noopener" style="text-decoration:none">Abrir a nota</a>
+        <button class="btn dark" type="button" data-act="colar-nota">Colar nota</button>
+        <button class="btn ghost" type="button" data-act="foto-da-nota">Usar foto da nota</button>
+        <button class="btn ghost" type="button" data-act="fechar-sheet">Cancelar</button>
+      </div>
+      <p class="nota-local">Ainda não criou o Atalho "Enviar para Despensa"? O passo a passo está no arquivo LEIAME do app.</p>
+    </div>`);
+}
+
+async function colarNota() {
+  let texto = '';
+  try { texto = await navigator.clipboard.readText(); }
+  catch { texto = prompt('Cole aqui o conteúdo da nota:') || ''; }
+  texto = String(texto || '').trim();
+  if (texto.length < 50) { toast('A área de transferência está vazia. Use o Atalho "Enviar para Despensa" na nota aberta.'); return; }
+  const chaveTexto = (texto.replace(/<[^>]+>/g, ' ').match(/(?:\d[\s.]?){44}/) || [''])[0].replace(/\D/g, '');
+  const info = notaAberta || (chaveTexto.length === 44
+    ? { chave: chaveTexto, uf: chaveTexto.slice(0, 2), cnpj: chaveTexto.slice(6, 20), url: chaveTexto.startsWith('42') ? 'https://sat.sef.sc.gov.br/nfce/consulta' : null }
+    : { chave: null, cnpj: null, url: null });
+  if (/SecurityVerify|valida[çc][ãa]o de seguran/i.test(texto)) { toast('A nota ainda está na tela de validação. Toque em Validar e envie de novo.'); return; }
+  let compra = null;
+  const ehHtml = /<\s*(html|body|div|table)/i.test(texto);
+  // texto puro: cada linha vira um bloco, para a leitura não juntar o cabeçalho à descrição do 1º item
+  const html = ehHtml ? texto : `<html><body>${texto.split(/\r?\n/).map((l) => `<div>${esc(l)}</div>`).join('')}</body></html>`;
+  compra = interpretarNota(html, { chave: info.chave || chaveTexto || `colada-${Date.now()}`, url: info.url, cnpj: info.cnpj });
+  if (!compra || !compra.items.length) {
+    const t = texto.replace(/<(br|\/p|\/div|\/tr|\/li)[^>]*>/gi, '\n').replace(/<[^>]+>/g, ' ');
+    const c2 = interpretarTextoNota(t, info.chave ? info : {});
+    if (c2.items.length) compra = { ...c2, fonte: 'nota' };
+  }
+  if (!compra || !compra.items.length) {
+    abrirSheet(`
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <h2>Não reconheci os itens</h2>
+        <div class="aviso">${ICON.alert}<span>Recebi a nota, mas não entendi o formato dos itens. Envie o conteúdo para ajustarmos a leitura, ou use a foto da nota.</span></div>
+        <div class="sheet-acoes">
+          <button class="btn dark" type="button" data-act="copiar-link" data-link="${esc(texto.slice(0, 20000))}">Copiar conteúdo recebido</button>
+          <button class="btn primary" type="button" data-act="foto-da-nota">Usar foto da nota</button>
+          <button class="btn ghost" type="button" data-act="fechar-sheet">Fechar</button>
+        </div>
+      </div>`);
+    return;
+  }
+  const existente = S().purchases.find((c) => c.id === compra.id);
+  if (existente) { toast(`Essa nota já foi registrada (${fmtDataLonga(existente.date)}).`); abrirCompra(existente.id); return; }
+  notaAberta = null;
+  try { await navigator.clipboard.writeText(''); } catch { /* sem permissão: tudo bem */ }
+  fecharSheet();
+  abrirConferencia(compra);
 }
 
 /* foto da nota */
@@ -1301,6 +1367,8 @@ document.addEventListener('click', async (e) => {
     }
     case 'salvar-compra': salvarConferencia(); break;
     case 'foto-nota': abrirFotoNota(null); break;
+    case 'colar-nota': colarNota(); break;
+    case 'foto-da-nota': abrirFotoNota(notaAberta); break;
     case 'foto-nota-de-novo': abrirFotoNota(fotoNota?.info || null); break;
     case 'mais-foto': {
       const info = fotoNota?.info || null;
@@ -1464,6 +1532,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && notaAberta) $('[data-act="colar-nota"]')?.focus();
   if (document.hidden && scan.stream) fecharLeitor();
 });
 
@@ -1486,4 +1555,4 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 // Exposto só para testes
-window.__despensa = { processarCodigo, processarQRNota, abrirConferencia, processarFotos, get state() { return S(); }, get store() { return store; }, scan, nuvem };
+window.__despensa = { colarNota, processarCodigo, processarQRNota, abrirConferencia, processarFotos, get state() { return S(); }, get store() { return store; }, scan, nuvem };

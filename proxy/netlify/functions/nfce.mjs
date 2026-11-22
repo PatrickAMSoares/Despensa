@@ -31,7 +31,9 @@ export default async (req) => {
   // Aceita o link completo (?url=) ou só o parâmetro p do QR Code de Santa Catarina (?p=chave|2|1|1|hash)
   let alvo;
   const p = params.get('p');
-  if (p && /^42\d{42}\|/.test(p)) alvo = new URL(`https://sat.sef.sc.gov.br/nfce/consulta?p=${p}`);
+  // fonte=svrs: consulta na Sefaz Virtual do RS, que autoriza as NFC-e de SC e de outros estados
+  if (p && /^\d{44}(\|[\w]*)*$/.test(p) && params.get('fonte') === 'svrs') alvo = new URL(`https://dfe-portal.svrs.rs.gov.br/Dfe/QrCodeNFce?p=${p}`);
+  else if (p && /^42\d{42}\|/.test(p)) alvo = new URL(`https://sat.sef.sc.gov.br/nfce/consulta?p=${p}`);
   else { try { alvo = new URL(params.get('url') || ''); } catch { alvo = null; } }
   if (!alvo || !/^https?:$/.test(alvo.protocol) || !alvo.hostname.endsWith('.gov.br') || !/nfc-?e/i.test(alvo.href)) {
     return new Response(`Endereço de nota fiscal inválido${diagnostico ? `\nrecebido: ${req.url}` : ''}`, { status: diagnostico ? 200 : 400, headers: cors });

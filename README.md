@@ -29,6 +29,15 @@ Web app instalável no iPhone (PWA). Não precisa de build: são só arquivos es
 - Na foto, o código de barras é conferido pelo dígito verificador e quantidade × preço é conferido com o total do item; o que não fecha aparece em laranja para corrigir.
 - Se nada der certo, dá para registrar só o total.
 
+### Atalho "Enviar para Despensa" (notas de SC)
+A SEF/SC pede que uma pessoa toque em "Validar" antes de mostrar a nota. O app abre a nota, você valida, e o Atalho do iPhone copia a página já liberada para o app colar.
+1. **Ajustes › Apps › Atalhos › Avançado** › ative **Permitir Execução de Scripts**.
+2. App **Atalhos** › **+** › renomeie para `Enviar para Despensa`.
+3. Toque em **ⓘ** (Detalhes) › ative **Mostrar na Folha de Compartilhamento** › em tipos aceitos deixe só **Páginas Web do Safari**.
+4. Adicione a ação **Executar JavaScript na Página Web** e troque o texto por: `completion(document.documentElement.outerHTML);`
+5. Adicione **Copiar para a Área de Transferência** (entrada: Resultado do JavaScript).
+6. Adicione **Mostrar Notificação** com o texto `Nota copiada. Volte ao app e toque em Colar nota.` › OK.
+
 ### Função de consulta (proxy)
 O navegador não pode ler a página da Fazenda diretamente (bloqueio CORS). A pasta `proxy/` tem uma função do Netlify que faz essa consulta, aceitando só endereços `.gov.br` de NFC-e e respondendo só ao app.
 1. No Netlify: **Add new site › Import an existing project › GitHub ›** repositório `despensa` › **Base directory: `proxy`** › Deploy.
