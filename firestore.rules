@@ -1,0 +1,52 @@
+rules_version = '2';
+// Regras da Despensa: cada casa só é vista e alterada pelos seus membros.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function logado() { return request.auth != null; }
+    function casa(hid) { return get(/databases/$(database)/documents/households/$(hid)); }
+    function membro(hid) { return logado() && request.auth.uid in casa(hid).data.members; }
+
+    // Perfil: cada pessoa lê e grava só o próprio (guarda em qual casa ela está)
+    match /users/{uid} {
+      allow read, write: if logado() && request.auth.uid == uid;
+    }
+
+    // Convites: quem tem o código consegue ler (só por código, sem listar)
+    match /invites/{code} {
+      allow get: if logado();
+      allow create: if logado() && membro(request.resource.data.hid)
+                    && request.resource.data.createdBy == request.auth.uid;
+      allow delete: if logado() && membro(resource.data.hid);
+    }
+
+    match /households/{hid} {
+      allow read: if logado() && request.auth.uid in resource.data.members;
+
+      allow create: if logado()
+                    && request.resource.data.owner == request.auth.uid
+                    && request.resource.data.members == [request.auth.uid];
+
+      allow update: if logado() && (
+        // membro altera dados da casa sem mexer em quem participa
+        (request.auth.uid in resource.data.members
+          && request.resource.data.members == resource.data.members
+          && request.resource.data.owner == resource.data.owner)
+        // dono pode remover pessoas (mas não a si mesmo)
+        || (request.auth.uid == resource.data.owner
+          && request.auth.uid in request.resource.data.members
+          && resource.data.members.hasAll(request.resource.data.members)
+          && request.resource.data.owner == resource.data.owner)
+        // nova pessoa entra com um código de convite válido desta casa
+        || (!(request.auth.uid in resource.data.members)
+          && request.resource.data.members == resource.data.members.concat([request.auth.uid])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'lastJoinCode'])
+          && get(/databases/$(database)/documents/invites/$(request.resource.data.lastJoinCode)).data.hid == hid)
+      );
+
+      // Produtos, lista de compras e (na etapa 4) notas
+      match /{colecao}/{docId} {
+        allow read, write: if membro(hid);
+      }
+    }
+  }
+}

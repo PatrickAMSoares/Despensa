@@ -1,9 +1,16 @@
-// Despensa — MVP local (etapa 2)
-// Dados ficam no próprio aparelho (localStorage). A sincronização entra na etapa 3.
+// Despensa — etapa 3: login e despensa compartilhada pela casa (Firebase).
+// Sem firebase-config.js preenchido, funciona em modo local (só neste aparelho).
+
+import { firebaseConfig as configArquivo } from './firebase-config.js';
+import { LocalStore, CloudStore, KEY_LOCAL, uid, norm } from './store.js';
 
 const CATEGORIAS = ['Mercearia', 'Bebidas', 'Limpeza', 'Higiene', 'Hortifrúti', 'Carnes/Frios', 'Congelados', 'Outros'];
-const KEY = 'despensa.v1';
 const KEY_MODO = 'despensa.modo';
+const URL_APP = 'https://patrickamsoares.github.io/despensa/';
+
+// Testes locais com o emulador do Firebase: http://localhost:PORTA/?emulador
+const EMULADOR = ['localhost', '127.0.0.1'].includes(location.hostname) && new URLSearchParams(location.search).has('emulador');
+const firebaseConfig = configArquivo || (EMULADOR ? { apiKey: 'demo-key', authDomain: 'localhost', projectId: 'demo-despensa', appId: 'demo' } : null);
 
 const ICON = {
   plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
@@ -14,70 +21,52 @@ const ICON = {
   alert: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5"/></svg>',
   x: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
   loading: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9"/></svg>',
+  logo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6v12M7.5 6v12M11 6v12M14 6v12M17.5 6v12M20 6v12"/></svg>',
 };
 
 /* ---------- utilidades ---------- */
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
-const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
-const agoraISO = () => new Date().toISOString();
 const fmtData = (iso) => new Date(iso).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
 const plural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
+const qtdDe = (p) => Math.max(0, Number(p.qty) || 0);
 
-/* ---------- dados ---------- */
-// products: { id, barcode|null, name, category, qty, createdAt, updatedAt }
-// list:     { id, productId|null, name, category, checked, addedAt, motivo: 'acabou'|'manual' }
-let state = carregar();
+/* ---------- estado ---------- */
+let store = null;           // LocalStore ou CloudStore
+const nuvem = { fb: null, auth: null, db: null, user: null };
+const ui = { tela: 'carregando', tab: 'despensa', busca: '', cat: 'Todas', modoLogin: 'entrar', ocupado: false };
 
-function carregar() {
-  try {
-    const s = JSON.parse(localStorage.getItem(KEY));
-    if (s && Array.isArray(s.products)) return { v: 1, products: s.products, list: Array.isArray(s.list) ? s.list : [] };
-  } catch { /* dados corrompidos: começa vazio */ }
-  return { v: 1, products: [], list: [] };
-}
-function salvar() {
-  try { localStorage.setItem(KEY, JSON.stringify(state)); }
-  catch { toast('Não foi possível salvar neste aparelho.'); }
-}
-const foto = () => JSON.stringify(state);
-function voltarPara(snap) { state = JSON.parse(snap); salvar(); render(); }
+const S = () => (store ? store.state : { products: [], list: [] });
 
-const porCodigo = (code) => state.products.find((p) => p.barcode === code);
-const porId = (id) => state.products.find((p) => p.id === id);
-
-function porNaLista(p, motivo = 'acabou') {
-  if (state.list.some((i) => i.productId === p.id)) return;
-  state.list.push({ id: uid(), productId: p.id, name: p.name, category: p.category, checked: false, addedAt: agoraISO(), motivo });
-}
-function tirarDaLista(p) { state.list = state.list.filter((i) => i.productId !== p.id); }
-
-function darEntrada(p, n = 1) {
-  p.qty += n;
-  p.updatedAt = agoraISO();
-  tirarDaLista(p);
-}
-function darSaida(p) {
-  if (p.qty > 0) { p.qty -= 1; p.updatedAt = agoraISO(); }
-  if (p.qty === 0) porNaLista(p, 'acabou');
+function usarStore(novo) {
+  if (store) store.parar();
+  store = novo;
+  if (store) store.aoMudar(() => render());
 }
 
 /* ---------- interface ---------- */
-const ui = { tab: 'despensa', busca: '', cat: 'Todas' };
-
 function render() {
+  document.body.classList.toggle('sem-abas', ui.tela !== 'app');
   document.querySelectorAll('.tab').forEach((b) => {
     const on = b.dataset.tab === ui.tab;
     b.classList.toggle('on', on);
     if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
-  const pend = state.list.filter((i) => !i.checked).length;
+  const pend = S().list.filter((i) => !i.checked).length;
   const badge = $('#badge-compras');
   badge.hidden = pend === 0;
   badge.textContent = pend > 99 ? '99+' : String(pend);
 
   const v = $('#view');
+  if (ui.tela === 'login') { if (!$('#form-login')) v.innerHTML = telaLogin(); return; }
+  if (ui.tela === 'casa') { if (!$('#tela-casa')) v.innerHTML = telaCasa(); return; }
+  if (ui.tela === 'carregando') { v.innerHTML = '<div class="vazio" style="margin-top:80px"><strong>Carregando…</strong></div>'; return; }
+
+  // Enquanto a pessoa digita na busca, atualiza só a lista (não fecha o teclado)
+  if (ui.tab === 'despensa' && document.activeElement && document.activeElement.id === 'busca') {
+    $('#lista-despensa').innerHTML = listaDespensa();
+    return;
+  }
   if (ui.tab === 'despensa') v.innerHTML = telaDespensa();
   else if (ui.tab === 'compras') v.innerHTML = telaCompras();
   else v.innerHTML = telaEmBreve(ui.tab);
@@ -87,24 +76,91 @@ function agrupar(itens) {
   const g = {};
   for (const it of itens) (g[it.category] ||= []).push(it);
   const ordem = [...CATEGORIAS.filter((c) => g[c]), ...Object.keys(g).filter((c) => !CATEGORIAS.includes(c))];
-  return ordem.map((c) => ({ cat: c, itens: g[c].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')) }));
+  return ordem.map((c) => ({ cat: c, itens: g[c].sort((a, b) => String(a.name).localeCompare(String(b.name), 'pt-BR')) }));
 }
 const vazio = (tit, txt) => `<div class="vazio"><strong>${esc(tit)}</strong><p>${esc(txt)}</p></div>`;
 
+function bannerErro() {
+  if (!store || !store.erro) return '';
+  const negado = String(store.erro.code || '').includes('permission');
+  return `<div class="aviso" style="margin:0 20px 12px">${ICON.alert}<span>${negado
+    ? 'Sem permissão para acessar a despensa da casa. Saia e entre de novo, ou peça um novo convite.'
+    : 'Problema ao sincronizar. As alterações ficam guardadas e são enviadas quando a conexão voltar.'}</span></div>`;
+}
+
+function subtituloCasa() {
+  if (!store || store.modo !== 'nuvem') return '';
+  const n = store.casa?.members?.length || 1;
+  return n > 1 ? ` · compartilhada com ${plural(n - 1, 'pessoa', 'pessoas')}` : ' · só você por enquanto';
+}
+
+/* Login */
+function telaLogin() {
+  const criar = ui.modoLogin === 'criar';
+  return `
+    <div class="auth">
+      <div class="auth-logo">${ICON.logo}</div>
+      <h1>Despensa</h1>
+      <p class="sub">${criar ? 'Crie sua conta para compartilhar a despensa da casa.' : 'Entre para ver a despensa da casa.'}</p>
+      <form id="form-login" class="auth-form" novalidate>
+        <div class="campo">
+          <label for="l-email">E-mail</label>
+          <input id="l-email" type="email" inputmode="email" autocomplete="email" autocapitalize="off" required>
+        </div>
+        <div class="campo">
+          <label for="l-senha">Senha${criar ? ' (mínimo 6 caracteres)' : ''}</label>
+          <input id="l-senha" type="password" autocomplete="${criar ? 'new-password' : 'current-password'}" minlength="6" required>
+        </div>
+        <p class="erro" id="login-erro" role="alert"></p>
+        <button class="btn primary" type="submit">${criar ? 'Criar conta' : 'Entrar'}</button>
+      </form>
+      <div class="auth-links">
+        <button type="button" class="link" data-act="alternar-login">${criar ? 'Já tenho conta: entrar' : 'Não tenho conta: criar agora'}</button>
+        ${criar ? '' : '<button type="button" class="link" data-act="esqueci-senha">Esqueci minha senha</button>'}
+      </div>
+    </div>`;
+}
+
+/* Criar ou entrar numa casa */
+function telaCasa() {
+  return `
+    <div class="auth" id="tela-casa">
+      <h1>Sua casa</h1>
+      <p class="sub">Conectado como ${esc(nuvem.user?.email || '')}</p>
+      <div class="card-op">
+        <h2>Primeira pessoa da casa?</h2>
+        <p>Crie a despensa e depois envie o código de convite para quem mora com você.</p>
+        <button class="btn primary" type="button" data-act="criar-casa">Criar a despensa da casa</button>
+      </div>
+      <form id="form-convite" class="card-op" novalidate>
+        <h2>Recebeu um convite?</h2>
+        <div class="campo">
+          <label for="c-codigo">Código de convite</label>
+          <input id="c-codigo" type="text" autocomplete="off" autocapitalize="characters" maxlength="6" placeholder="Ex.: K7QP2M" style="text-transform:uppercase;letter-spacing:3px;font-weight:700">
+        </div>
+        <p class="erro" id="convite-erro" role="alert"></p>
+        <button class="btn dark" type="submit">Entrar na despensa</button>
+      </form>
+      <button type="button" class="link" data-act="sair">Sair da conta</button>
+    </div>`;
+}
+
 /* Despensa */
 function telaDespensa() {
-  const estoque = state.products.filter((p) => p.qty > 0);
-  const unidades = estoque.reduce((s, p) => s + p.qty, 0);
+  const prods = S().products;
+  const estoque = prods.filter((p) => qtdDe(p) > 0);
+  const unidades = estoque.reduce((s, p) => s + qtdDe(p), 0);
   const cats = ['Todas', ...CATEGORIAS.filter((c) => estoque.some((p) => p.category === c))];
   if (!cats.includes(ui.cat)) ui.cat = 'Todas';
   return `
     <header class="top">
-      <div><h1>Despensa</h1><p class="sub">${plural(estoque.length, 'produto', 'produtos')} · ${plural(unidades, 'unidade', 'unidades')}</p></div>
+      <div><h1>Despensa</h1><p class="sub">${plural(estoque.length, 'produto', 'produtos')} · ${plural(unidades, 'unidade', 'unidades')}${subtituloCasa()}</p></div>
       <div class="top-actions">
         <button class="icon-btn" type="button" data-act="novo" aria-label="Adicionar produto sem código">${ICON.plus}</button>
-        <button class="icon-btn" type="button" data-act="config" aria-label="Backup e configurações">${ICON.gear}</button>
+        <button class="icon-btn" type="button" data-act="config" aria-label="Conta, convite e backup">${ICON.gear}</button>
       </div>
     </header>
+    ${bannerErro()}
     <div class="pad">
       <label for="busca" class="sr">Buscar produto</label>
       <div class="search">${ICON.search}<input id="busca" type="search" placeholder="Buscar produto" value="${esc(ui.busca)}" autocomplete="off" enterkeyhint="search"></div>
@@ -114,11 +170,12 @@ function telaDespensa() {
 }
 
 function listaDespensa() {
-  if (!state.products.some((p) => p.qty > 0)) {
+  const prods = S().products;
+  if (!prods.some((p) => qtdDe(p) > 0)) {
     return vazio('Sua despensa está vazia', 'Toque no botão verde e leia o código de barras dos produtos que você comprou. Itens sem código (frutas, carne, granel) entram pelo botão +.');
   }
   const q = norm(ui.busca);
-  const itens = state.products.filter((p) => p.qty > 0 && (ui.cat === 'Todas' || p.category === ui.cat) && (!q || norm(p.name).includes(q)));
+  const itens = prods.filter((p) => qtdDe(p) > 0 && (ui.cat === 'Todas' || p.category === ui.cat) && (!q || norm(p.name).includes(q)));
   if (!itens.length) return vazio('Nada encontrado', 'Tente outro nome ou outra categoria.');
   return agrupar(itens).map((g) => `
     <section class="grupo">
@@ -128,7 +185,8 @@ function listaDespensa() {
 }
 
 function linhaProduto(p) {
-  const tags = (p.qty === 1 ? '<span class="tag warn">Última unidade</span>' : '') + (!p.barcode ? '<span class="tag">Sem código</span>' : '');
+  const q = qtdDe(p);
+  const tags = (q === 1 ? '<span class="tag warn">Última unidade</span>' : '') + (!p.barcode ? '<span class="tag">Sem código</span>' : '');
   return `
     <div class="row">
       <button type="button" class="row-main" data-act="editar" data-id="${p.id}">
@@ -137,7 +195,7 @@ function linhaProduto(p) {
       </button>
       <div class="stepper">
         <button type="button" data-act="menos" data-id="${p.id}" aria-label="Tirar uma unidade de ${esc(p.name)}">−</button>
-        <span class="qtd" aria-label="${p.qty} unidades">${p.qty}</span>
+        <span class="qtd" aria-label="${q} unidades">${q}</span>
         <button type="button" data-act="mais" data-id="${p.id}" aria-label="Somar uma unidade de ${esc(p.name)}">+</button>
       </div>
     </div>`;
@@ -145,8 +203,8 @@ function linhaProduto(p) {
 
 /* Compras */
 function telaCompras() {
-  const itens = state.list.map((i) => {
-    const p = i.productId ? porId(i.productId) : null;
+  const itens = S().list.map((i) => {
+    const p = i.productId ? store.porId(i.productId) : null;
     return { ...i, name: p ? p.name : i.name, category: p ? p.category : i.category };
   });
   const marcados = itens.filter((i) => i.checked).length;
@@ -162,6 +220,7 @@ function telaCompras() {
       <div><h1>Compras</h1><p class="sub">${plural(itens.length, 'item', 'itens')} · ${marcados} no carrinho</p></div>
       <div class="top-actions"><button class="icon-btn" type="button" data-act="add-lista" aria-label="Adicionar item à lista">${ICON.plus}</button></div>
     </header>
+    ${bannerErro()}
     ${corpo}
     <div class="acoes">
       ${marcados ? `<button class="btn primary" type="button" data-act="guardar">Guardar ${plural(marcados, 'item', 'itens')} na despensa</button>` : ''}
@@ -214,10 +273,10 @@ function radiosCategoria(sel) {
     <label class="cat-radio"><input type="radio" name="cat" value="${esc(c)}" ${c === sel ? 'checked' : ''}><span>${esc(c)}</span></label>`).join('')}</div>`;
 }
 
-// Cadastro / edição de produto
 function abrirProduto({ id = null, barcode = null, name = '', category = 'Mercearia', qty = 1, titulo, aviso, aoConcluir } = {}) {
-  const p = id ? porId(id) : null;
-  if (p) ({ barcode, name, category, qty } = p);
+  const p = id ? store.porId(id) : null;
+  if (p) ({ barcode, name, category } = p);
+  if (p) qty = qtdDe(p);
   const tit = titulo || (p ? 'Editar produto' : (barcode ? 'Novo produto' : 'Produto sem código'));
   abrirSheet(`
     <form id="form-produto" data-id="${p ? p.id : ''}" data-barcode="${esc(barcode || '')}" novalidate>
@@ -253,28 +312,12 @@ function salvarProduto(form) {
   if (!nome) { $('#f-nome', form).focus(); toast('Digite o nome do produto.'); return; }
   const cat = (form.querySelector('input[name="cat"]:checked') || {}).value || 'Outros';
   const qtd = Math.max(0, Math.min(999, parseInt($('#f-qtd', form).value, 10) || 0));
-  const id = form.dataset.id;
-  const barcode = form.dataset.barcode || null;
-  const snap = foto();
-  let p = id ? porId(id) : null;
-
-  if (!p && barcode && porCodigo(barcode)) p = porCodigo(barcode); // evita duplicar o mesmo código
-  if (p) {
-    Object.assign(p, { name: nome, category: cat, qty: qtd, updatedAt: agoraISO() });
-    state.list.forEach((i) => { if (i.productId === p.id) { i.name = nome; i.category = cat; } });
-  } else {
-    p = { id: uid(), barcode, name: nome, category: cat, qty: qtd, createdAt: agoraISO(), updatedAt: agoraISO() };
-    state.products.push(p);
-    // se havia um item manual com o mesmo nome na lista, liga ao produto
-    state.list.forEach((i) => { if (!i.productId && norm(i.name) === norm(nome)) i.productId = p.id; });
-  }
-  if (p.qty === 0) porNaLista(p, 'acabou'); else tirarDaLista(p);
-  salvar();
+  const snap = store.foto();
+  const p = store.salvarProduto({ id: form.dataset.id || null, barcode: form.dataset.barcode || null, name: nome, category: cat, qty: qtd });
   fecharSheet({ produto: p, snap });
   render();
 }
 
-// Item manual na lista de compras
 function abrirItemLista() {
   abrirSheet(`
     <form id="form-lista" novalidate>
@@ -283,7 +326,7 @@ function abrirItemLista() {
         <div class="campo">
           <label for="l-nome">Item</label>
           <input id="l-nome" type="text" list="l-sugestoes" placeholder="Ex.: Creme dental" autocomplete="off" enterkeyhint="done">
-          <datalist id="l-sugestoes">${state.products.map((p) => `<option value="${esc(p.name)}"></option>`).join('')}</datalist>
+          <datalist id="l-sugestoes">${S().products.map((p) => `<option value="${esc(p.name)}"></option>`).join('')}</datalist>
         </div>
         <fieldset class="campo"><legend>Categoria</legend>${radiosCategoria('Mercearia')}</fieldset>
         <div class="sheet-acoes">
@@ -297,57 +340,66 @@ function abrirItemLista() {
 function salvarItemLista(form) {
   const nome = $('#l-nome', form).value.trim().replace(/\s+/g, ' ');
   if (!nome) { $('#l-nome', form).focus(); return; }
-  const existente = state.products.find((p) => norm(p.name) === norm(nome));
-  if (existente) {
-    if (state.list.some((i) => i.productId === existente.id)) { toast('Esse item já está na lista.'); return; }
-    state.list.push({ id: uid(), productId: existente.id, name: existente.name, category: existente.category, checked: false, addedAt: agoraISO(), motivo: 'manual' });
-  } else {
-    const cat = (form.querySelector('input[name="cat"]:checked') || {}).value || 'Outros';
-    state.list.push({ id: uid(), productId: null, name: nome, category: cat, checked: false, addedAt: agoraISO(), motivo: 'manual' });
-  }
-  salvar();
+  const cat = (form.querySelector('input[name="cat"]:checked') || {}).value || 'Outros';
+  const r = store.adicionarNaLista({ name: nome, category: cat });
+  if (r.duplicado) { toast('Esse item já está na lista.'); return; }
   fecharSheet();
   render();
 }
 
 function guardarMarcados() {
-  const marcados = state.list.filter((i) => i.checked);
-  if (!marcados.length) return;
-  const snap = foto();
-  for (const i of marcados) {
-    let p = i.productId ? porId(i.productId) : state.products.find((x) => norm(x.name) === norm(i.name));
-    if (!p) {
-      p = { id: uid(), barcode: null, name: i.name, category: i.category, qty: 0, createdAt: agoraISO(), updatedAt: agoraISO() };
-      state.products.push(p);
-    }
-    darEntrada(p, 1);
-  }
-  state.list = state.list.filter((i) => !i.checked);
-  salvar();
-  render();
-  toast(`${plural(marcados.length, 'item guardado', 'itens guardados')} (+1 cada). Ajuste a quantidade na despensa se precisar.`, { acao: 'Desfazer', fn: () => voltarPara(snap) });
+  const snap = store.foto();
+  const n = store.guardarMarcados();
+  if (!n) return;
+  toast(`${plural(n, 'item guardado', 'itens guardados')} (+1 cada). Ajuste a quantidade na despensa se precisar.`, { acao: 'Desfazer', fn: () => store.restaurar(snap) });
 }
 
-// Backup
+/* Conta, convite e backup */
 function abrirConfig() {
+  const naNuvem = store.modo === 'nuvem';
+  const casa = naNuvem ? store.casa : null;
+  const pessoas = casa?.members?.length || 1;
   abrirSheet(`
     <div style="display:flex;flex-direction:column;gap:16px">
-      <h2>Backup</h2>
-      <p class="nota-local">Por enquanto os dados ficam só neste aparelho. A sincronização entre os celulares chega na etapa 3. Até lá, faça um backup de vez em quando.</p>
+      <h2>${naNuvem ? 'Conta e casa' : 'Backup'}</h2>
+      ${naNuvem ? `
+        <div class="card-op" style="gap:6px">
+          <span class="info">Conectado como</span>
+          <strong>${esc(nuvem.user?.email || '')}</strong>
+          <span class="info">${pessoas > 1 ? `Despensa compartilhada por ${pessoas} pessoas` : 'Só você nesta despensa por enquanto'}</span>
+        </div>
+        <div class="card-op">
+          <span class="info">Código de convite</span>
+          <span class="codigo-grande">${esc(casa?.inviteCode || '······')}</span>
+          <button class="btn dark" type="button" data-act="compartilhar-convite" ${casa?.inviteCode ? '' : 'disabled'}>Enviar convite</button>
+        </div>`
+      : `<p class="nota-local">Modo local: os dados ficam só neste aparelho porque o Firebase ainda não foi configurado.</p>`}
       <div class="sheet-acoes">
-        <button class="btn dark" type="button" data-act="exportar">Exportar backup (.json)</button>
+        <button class="btn ghost" type="button" data-act="exportar">Exportar backup (.json)</button>
         <label class="btn ghost" for="importar" style="cursor:pointer">Importar backup</label>
         <input id="importar" type="file" accept="application/json,.json" class="sr">
-        <button class="btn danger" type="button" data-act="apagar-tudo">Apagar todos os dados</button>
+        ${naNuvem ? '<button class="btn ghost" type="button" data-act="sair">Sair da conta</button>' : ''}
+        <button class="btn danger" type="button" data-act="apagar-tudo">Apagar todos os dados${naNuvem ? ' da casa' : ''}</button>
         <button class="btn ghost" type="button" data-act="fechar-sheet">Fechar</button>
       </div>
-      <p class="nota-local">${plural(state.products.length, 'produto cadastrado', 'produtos cadastrados')} · ${plural(state.list.length, 'item', 'itens')} na lista.</p>
+      <p class="nota-local">${plural(S().products.length, 'produto cadastrado', 'produtos cadastrados')} · ${plural(S().list.length, 'item', 'itens')} na lista.</p>
     </div>`);
+}
+
+async function compartilharConvite() {
+  const code = store.casa?.inviteCode;
+  if (!code) return;
+  const texto = `Entre na nossa despensa:\n1. Abra ${URL_APP} no Safari\n2. Crie sua conta\n3. Use o código de convite: ${code}`;
+  try {
+    if (navigator.share) { await navigator.share({ title: 'Convite da Despensa', text: texto }); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(texto); toast('Convite copiado. Cole no WhatsApp.'); }
+  catch { toast(`Código de convite: ${code}`); }
 }
 
 async function exportar() {
   const nome = `despensa-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ v: 1, ...S() }, null, 2)], { type: 'application/json' });
   const arquivo = new File([blob], nome, { type: 'application/json' });
   try {
     if (navigator.canShare && navigator.canShare({ files: [arquivo] })) {
@@ -366,9 +418,8 @@ async function importar(file) {
   try {
     const dados = JSON.parse(await file.text());
     if (!dados || !Array.isArray(dados.products)) throw new Error('formato');
-    if (!confirm(`Substituir os dados atuais por este backup (${plural(dados.products.length, 'produto', 'produtos')})?`)) return;
-    state = { v: 1, products: dados.products, list: Array.isArray(dados.list) ? dados.list : [] };
-    salvar();
+    if (!confirm(`Substituir os dados atuais${store.modo === 'nuvem' ? ' da casa (para todos)' : ''} por este backup (${plural(dados.products.length, 'produto', 'produtos')})?`)) return;
+    await store.substituirTudo(dados);
     fecharSheet();
     render();
     toast('Backup importado.');
@@ -391,7 +442,7 @@ function toast(msg, { acao, fn } = {}) {
 /* ---------- leitor de código de barras ---------- */
 const scan = {
   stream: null, detector: null, timer: null, ocupado: false, pausado: false,
-  ultimo: '', ultimoEm: 0, audio: null,
+  ultimo: '', ultimoEm: 0, audio: null, ultimoSnap: null,
   modo: localStorage.getItem(KEY_MODO) === 'saida' ? 'saida' : 'entrada',
 };
 const quadro = document.createElement('canvas');
@@ -426,6 +477,7 @@ function atualizarModo() {
 }
 
 async function abrirLeitor() {
+  if (ui.tela !== 'app') return;
   $('#scanner').hidden = false;
   document.body.classList.add('no-scroll');
   atualizarModo();
@@ -452,7 +504,7 @@ async function abrirLeitor() {
     lacoLeitura();
   } catch (e) {
     if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) {
-      cartaoErro('Permita o uso da câmera. No iPhone: Ajustes › Safari › Câmera › Permitir. Se o app estiver instalado na tela inicial, feche e abra de novo depois de permitir.');
+      cartaoErro('Permita o uso da câmera. No iPhone: Ajustes › Apps › Safari › Câmera › Permitir. Se o app estiver instalado na tela inicial, feche e abra de novo depois de permitir.');
     } else if (e && e.name === 'NotFoundError') {
       cartaoErro('Nenhuma câmera encontrada neste aparelho.');
     } else {
@@ -478,7 +530,6 @@ async function lacoLeitura() {
   if (!scan.pausado && !scan.ocupado && v.readyState >= 2 && v.videoWidth) {
     scan.ocupado = true;
     try {
-      // lê só o centro da imagem (onde fica a moldura): mais rápido e com menos falsos positivos
       const w = v.videoWidth, h = v.videoHeight;
       const cw = Math.round(w * 0.85), ch = Math.round(h * 0.5);
       quadro.width = cw; quadro.height = ch;
@@ -493,7 +544,7 @@ async function lacoLeitura() {
 
 function aoLerCodigo(code) {
   const t = Date.now();
-  if (code === scan.ultimo && t - scan.ultimoEm < 2500) { scan.ultimoEm = t; return; } // ignora o mesmo produto parado na frente da câmera
+  if (code === scan.ultimo && t - scan.ultimoEm < 2500) { scan.ultimoEm = t; return; }
   scan.ultimo = code;
   scan.ultimoEm = t;
   bip();
@@ -516,27 +567,24 @@ function bip() {
 
 function processarCodigo(code) {
   code = String(code || '').replace(/\s/g, '');
-  if (!code) return;
-  const p = porCodigo(code);
+  if (!code || !store) return;
+  const p = store.porCodigo(code);
   if (scan.modo === 'entrada') {
     if (p) {
-      const snap = foto();
-      darEntrada(p, 1);
-      salvar();
-      cartaoResultado({ tipo: 'ok', titulo: 'Entrada registrada  +1', nome: p.name, qtd: p.qty, snap });
+      const snap = store.foto();
+      const r = store.entrada(p, 1);
+      cartaoResultado({ tipo: 'ok', titulo: 'Entrada registrada  +1', nome: p.name, qtd: r.qty, snap });
     } else {
       cadastrarPeloLeitor(code, 1);
     }
   } else if (p) {
-    const snap = foto();
-    const antes = p.qty;
-    darSaida(p);
-    salvar();
+    const snap = store.foto();
+    const r = store.saida(p);
     cartaoResultado({
       tipo: 'out',
-      titulo: antes === 0 ? 'Já estava zerado' : 'Saída registrada  −1',
-      nome: p.name, qtd: p.qty, snap: antes === 0 ? null : snap,
-      nota: p.qty === 0 ? 'Acabou: foi para a lista de compras.' : '',
+      titulo: r.antes === 0 ? 'Já estava zerado' : 'Saída registrada  −1',
+      nome: p.name, qtd: r.qty, snap: r.antes === 0 && !r.foiParaLista ? null : snap,
+      nota: r.qty === 0 ? 'Acabou: está na lista de compras.' : '',
     });
   } else {
     cartaoDesconhecido(code);
@@ -573,7 +621,6 @@ async function cadastrarPeloLeitor(code, qtd) {
   });
 }
 
-// Busca o nome em bases públicas e gratuitas (Open Food/Beauty/Products Facts)
 async function buscarNaBase(code) {
   const fontes = [
     ['https://world.openfoodfacts.org', null],
@@ -625,7 +672,6 @@ function digitarCodigo() {
   processarCodigo(code);
 }
 
-/* cartões do leitor */
 function cartaoInicial() {
   $('#scan-card').innerHTML = `
     <p class="res-nota">${scan.modo === 'entrada'
@@ -650,7 +696,7 @@ function cartaoResultado({ tipo, titulo, nome, qtd, snap, nota }) {
       <button class="btn ghost" type="button" data-act="desfazer" ${snap ? '' : 'disabled'}>Desfazer</button>
       <button class="btn dark" type="button" data-act="digitar">Digitar código</button>
     </div>`;
-  ultimoSnap = snap || null;
+  scan.ultimoSnap = snap || null;
 }
 function cartaoDesconhecido(code) {
   $('#scan-card').innerHTML = `
@@ -670,10 +716,135 @@ function cartaoErro(msg) {
     <p class="res-nota">${esc(msg)}</p>
     <button class="btn dark" type="button" data-act="digitar" style="min-height:48px">Digitar código</button>`;
 }
-let ultimoSnap = null;
+
+/* ---------- nuvem: login e casa ---------- */
+const ERROS_AUTH = {
+  'auth/invalid-credential': 'E-mail ou senha incorretos.',
+  'auth/wrong-password': 'E-mail ou senha incorretos.',
+  'auth/user-not-found': 'E-mail ou senha incorretos.',
+  'auth/invalid-email': 'E-mail inválido.',
+  'auth/missing-password': 'Digite a senha.',
+  'auth/email-already-in-use': 'Já existe uma conta com esse e-mail. Use "Já tenho conta: entrar".',
+  'auth/weak-password': 'A senha precisa ter pelo menos 6 caracteres.',
+  'auth/network-request-failed': 'Sem conexão com a internet.',
+  'auth/too-many-requests': 'Muitas tentativas. Espere alguns minutos e tente de novo.',
+  'auth/operation-not-allowed': 'Login por e-mail não está ativado no Firebase (Authentication › Método de login).',
+};
+const msgErro = (e) => ERROS_AUTH[e?.code] || `Não foi possível concluir (${e?.code || e?.message || 'erro'}).`;
+
+async function iniciarNuvem() {
+  const fb = await import('./vendor/firebase.js');
+  const app = fb.initializeApp(firebaseConfig);
+  const auth = fb.initializeAuth(app, { persistence: [fb.indexedDBLocalPersistence, fb.browserLocalPersistence] });
+  const db = fb.initializeFirestore(app, { localCache: fb.persistentLocalCache({ tabManager: fb.persistentMultipleTabManager() }) });
+  if (EMULADOR) {
+    fb.connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+    fb.connectFirestoreEmulator(db, '127.0.0.1', 8080);
+  }
+  Object.assign(nuvem, { fb, auth, db });
+
+  fb.onAuthStateChanged(auth, async (user) => {
+    nuvem.user = user;
+    if (!user) { usarStore(null); ui.tela = 'login'; render(); return; }
+    ui.tela = 'carregando'; render();
+    const chave = `despensa.casa.${user.uid}`;
+    let hid = localStorage.getItem(chave);
+    try {
+      const s = await fb.getDoc(fb.doc(db, 'users', user.uid));
+      hid = s.exists() ? s.data().householdId || null : null;
+      if (hid) localStorage.setItem(chave, hid); else localStorage.removeItem(chave);
+    } catch { /* offline: usa a casa guardada no aparelho */ }
+    if (!hid) { usarStore(null); ui.tela = 'casa'; render(); return; }
+    abrirCasa(hid);
+  });
+}
+
+async function abrirCasa(hid) {
+  usarStore(new CloudStore(nuvem.fb, nuvem.db, hid));
+  ui.tela = 'app';
+  render();
+  await store.pronto;
+  oferecerMigracao(hid);
+}
+
+function gerarCodigo() {
+  const alfabeto = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const r = crypto.getRandomValues(new Uint32Array(6));
+  return [...r].map((n) => alfabeto[n % alfabeto.length]).join('');
+}
+
+async function criarCasa() {
+  const { fb, db, user } = nuvem;
+  const hid = uid();
+  let code = gerarCodigo();
+  await fb.setDoc(fb.doc(db, 'households', hid), { owner: user.uid, members: [user.uid], inviteCode: code, createdAt: fb.serverTimestamp() });
+  for (let tentativa = 0; ; tentativa++) {
+    try {
+      await fb.setDoc(fb.doc(db, 'invites', code), { hid, createdBy: user.uid });
+      break;
+    } catch (e) {
+      if (tentativa >= 3) throw e;
+      code = gerarCodigo(); // código já usado por outra casa: gera outro
+      await fb.updateDoc(fb.doc(db, 'households', hid), { inviteCode: code });
+    }
+  }
+  await fb.setDoc(fb.doc(db, 'users', user.uid), { householdId: hid, email: user.email });
+  localStorage.setItem(`despensa.casa.${user.uid}`, hid);
+  return hid;
+}
+
+async function entrarComCodigo(code) {
+  const { fb, db, user } = nuvem;
+  const inv = await fb.getDoc(fb.doc(db, 'invites', code));
+  if (!inv.exists()) { const e = new Error('Código não encontrado. Confira as letras e números.'); e.amigavel = true; throw e; }
+  const hid = inv.data().hid;
+  await fb.updateDoc(fb.doc(db, 'households', hid), { members: fb.arrayUnion(user.uid), lastJoinCode: code });
+  await fb.setDoc(fb.doc(db, 'users', user.uid), { householdId: hid, email: user.email });
+  localStorage.setItem(`despensa.casa.${user.uid}`, hid);
+  return hid;
+}
+
+// Dados criados antes do login (modo local) podem ser enviados para a casa uma única vez
+function oferecerMigracao(hid) {
+  const flag = `despensa.migrado.${hid}`;
+  if (localStorage.getItem(flag)) return;
+  let local = null;
+  try { local = JSON.parse(localStorage.getItem(KEY_LOCAL)); } catch { /* nada */ }
+  if (!local || !Array.isArray(local.products) || !local.products.length) { localStorage.setItem(flag, '1'); return; }
+  abrirSheet(`
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <h2>Dados deste aparelho</h2>
+      <p class="nota-local" style="font-size:15px;color:var(--text)">Este celular tem ${plural(local.products.length, 'produto', 'produtos')} cadastrados antes do login. Quer enviar para a despensa da casa? Produtos iguais (mesmo código ou nome) têm as quantidades somadas.</p>
+      <div class="sheet-acoes">
+        <button class="btn primary" type="button" data-act="migrar-sim">Enviar para a casa</button>
+        <button class="btn ghost" type="button" data-act="migrar-nao">Agora não</button>
+      </div>
+    </div>`);
+}
+
+async function migrar(sim) {
+  const hid = store.hid;
+  const raw = localStorage.getItem(KEY_LOCAL);
+  if (sim && raw) {
+    await store.mesclar(JSON.parse(raw));
+    localStorage.setItem('despensa.v1.backup', raw); // cópia de segurança
+    localStorage.removeItem(KEY_LOCAL);
+    toast('Produtos enviados para a casa.');
+  }
+  localStorage.setItem(`despensa.migrado.${hid}`, '1');
+  fecharSheet();
+  render();
+}
+
+async function sair() {
+  if (!confirm('Sair da conta neste aparelho?')) return;
+  fecharSheet();
+  usarStore(null);
+  await nuvem.fb.signOut(nuvem.auth);
+}
 
 /* ---------- eventos ---------- */
-document.addEventListener('click', (e) => {
+document.addEventListener('click', async (e) => {
   const tab = e.target.closest('[data-tab]');
   if (tab) {
     ui.tab = tab.dataset.tab;
@@ -704,16 +875,16 @@ document.addEventListener('click', (e) => {
     case 'digitar': digitarCodigo(); break;
     case 'cartao-inicial': cartaoInicial(); break;
     case 'desfazer':
-      if (ultimoSnap) { voltarPara(ultimoSnap); ultimoSnap = null; cartaoInicial(); toast('Leitura desfeita.'); }
+      if (scan.ultimoSnap) { store.restaurar(scan.ultimoSnap); scan.ultimoSnap = null; cartaoInicial(); toast('Leitura desfeita.'); }
       break;
     case 'cadastrar-zerado': cadastrarPeloLeitor(el.dataset.code, 0); break;
-    case 'mais': { const p = porId(id); if (p) { darEntrada(p, 1); salvar(); render(); } break; }
+    case 'mais': { const p = store.porId(id); if (p) store.entrada(p, 1); break; }
     case 'menos': {
-      const p = porId(id);
+      const p = store.porId(id);
       if (p) {
-        const snap = foto();
-        darSaida(p); salvar(); render();
-        if (p.qty === 0) toast(`${p.name} acabou e foi para a lista.`, { acao: 'Desfazer', fn: () => voltarPara(snap) });
+        const snap = store.foto();
+        const r = store.saida(p);
+        if (r.foiParaLista) toast(`${p.name} acabou e foi para a lista.`, { acao: 'Desfazer', fn: () => store.restaurar(snap) });
       }
       break;
     }
@@ -721,10 +892,13 @@ document.addEventListener('click', (e) => {
     case 'novo': abrirProduto({ qty: 1 }); break;
     case 'config': abrirConfig(); break;
     case 'exportar': exportar(); break;
+    case 'compartilhar-convite': compartilharConvite(); break;
     case 'apagar-tudo':
-      if (confirm('Apagar todos os produtos e a lista de compras deste aparelho? Isso não pode ser desfeito (a não ser que você tenha um backup).')) {
-        state = { v: 1, products: [], list: [] };
-        salvar(); fecharSheet(); render(); toast('Dados apagados.');
+      if (confirm(store.modo === 'nuvem'
+        ? 'Apagar TODOS os produtos e a lista de compras da casa? Isso apaga para todas as pessoas e não pode ser desfeito (a não ser que você tenha um backup).'
+        : 'Apagar todos os produtos e a lista de compras deste aparelho? Isso não pode ser desfeito (a não ser que você tenha um backup).')) {
+        await store.substituirTudo({ products: [], list: [] });
+        fecharSheet(); render(); toast('Dados apagados.');
       }
       break;
     case 'fechar-sheet': fecharSheet(); break;
@@ -736,33 +910,54 @@ document.addEventListener('click', (e) => {
     }
     case 'excluir-produto': {
       const pid = $('#form-produto').dataset.id;
-      const p = porId(pid);
+      const p = store.porId(pid);
       if (p && confirm(`Excluir "${p.name}" da despensa?`)) {
-        const snap = foto();
-        state.products = state.products.filter((x) => x.id !== pid);
-        state.list = state.list.filter((i) => i.productId !== pid);
-        salvar(); fecharSheet(); render();
-        toast('Produto excluído.', { acao: 'Desfazer', fn: () => voltarPara(snap) });
+        const snap = store.foto();
+        store.excluirProduto(pid);
+        fecharSheet(); render();
+        toast('Produto excluído.', { acao: 'Desfazer', fn: () => store.restaurar(snap) });
       }
       break;
     }
     case 'add-lista': abrirItemLista(); break;
     case 'tirar-lista': {
-      const snap = foto();
-      state.list = state.list.filter((i) => i.id !== id);
-      salvar(); render();
-      toast('Item removido da lista.', { acao: 'Desfazer', fn: () => voltarPara(snap) });
+      const snap = store.foto();
+      store.tirarItem(id);
+      toast('Item removido da lista.', { acao: 'Desfazer', fn: () => store.restaurar(snap) });
       break;
     }
     case 'guardar': guardarMarcados(); break;
+
+    // conta
+    case 'alternar-login':
+      ui.modoLogin = ui.modoLogin === 'entrar' ? 'criar' : 'entrar';
+      $('#view').innerHTML = telaLogin();
+      break;
+    case 'esqueci-senha': {
+      const email = ($('#l-email')?.value || '').trim();
+      if (!email) { $('#login-erro').textContent = 'Digite seu e-mail acima e toque de novo em "Esqueci minha senha".'; break; }
+      try { await nuvem.fb.sendPasswordResetEmail(nuvem.auth, email); $('#login-erro').textContent = ''; toast('Enviamos um e-mail para redefinir a senha.'); }
+      catch (err) { $('#login-erro').textContent = msgErro(err); }
+      break;
+    }
+    case 'criar-casa': {
+      if (ui.ocupado) break;
+      ui.ocupado = true; el.disabled = true; el.textContent = 'Criando…';
+      try { const hid = await criarCasa(); await abrirCasa(hid); toast('Despensa criada. Envie o convite pela engrenagem.'); }
+      catch (err) { console.error(err); toast(`Não foi possível criar (${err.code || err.message}). Verifique a internet.`); el.disabled = false; el.textContent = 'Criar a despensa da casa'; }
+      ui.ocupado = false;
+      break;
+    }
+    case 'sair': sair(); break;
+    case 'migrar-sim': migrar(true); break;
+    case 'migrar-nao': migrar(false); break;
     default: break;
   }
 });
 
 document.addEventListener('change', (e) => {
   if (e.target.matches('[data-act="marcar"]')) {
-    const i = state.list.find((x) => x.id === e.target.dataset.id);
-    if (i) { i.checked = e.target.checked; salvar(); render(); }
+    store.marcarItem(e.target.dataset.id, e.target.checked);
   } else if (e.target.id === 'importar' && e.target.files[0]) {
     importar(e.target.files[0]);
   }
@@ -775,28 +970,68 @@ document.addEventListener('input', (e) => {
   }
 });
 
-document.addEventListener('submit', (e) => {
+document.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (e.target.id === 'form-produto') salvarProduto(e.target);
-  else if (e.target.id === 'form-lista') salvarItemLista(e.target);
+  const f = e.target;
+  if (f.id === 'form-produto') salvarProduto(f);
+  else if (f.id === 'form-lista') salvarItemLista(f);
+  else if (f.id === 'form-login') {
+    if (ui.ocupado) return;
+    const email = $('#l-email').value.trim();
+    const senha = $('#l-senha').value;
+    const btn = f.querySelector('button[type="submit"]');
+    ui.ocupado = true; btn.disabled = true;
+    $('#login-erro').textContent = '';
+    try {
+      if (ui.modoLogin === 'criar') await nuvem.fb.createUserWithEmailAndPassword(nuvem.auth, email, senha);
+      else await nuvem.fb.signInWithEmailAndPassword(nuvem.auth, email, senha);
+    } catch (err) {
+      $('#login-erro').textContent = msgErro(err);
+      btn.disabled = false;
+    }
+    ui.ocupado = false;
+  } else if (f.id === 'form-convite') {
+    if (ui.ocupado) return;
+    const code = $('#c-codigo').value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (code.length !== 6) { $('#convite-erro').textContent = 'O código tem 6 letras e números.'; return; }
+    const btn = f.querySelector('button[type="submit"]');
+    ui.ocupado = true; btn.disabled = true;
+    $('#convite-erro').textContent = '';
+    try { const hid = await entrarComCodigo(code); await abrirCasa(hid); toast('Pronto! Você está na despensa da casa.'); }
+    catch (err) {
+      console.error(err);
+      $('#convite-erro').textContent = err.amigavel ? err.message : (String(err.code).includes('permission') ? 'Convite inválido para esta casa.' : `Não foi possível entrar (${err.code || err.message}).`);
+      btn.disabled = false;
+    }
+    ui.ocupado = false;
+  }
 });
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#sheet-bd').hidden) fecharSheet();
 });
 
-// Para a câmera se o app for para segundo plano (economiza bateria e libera a câmera)
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && scan.stream) fecharLeitor();
 });
 
 /* ---------- início ---------- */
-render();
+if (firebaseConfig) {
+  render();
+  iniciarNuvem().catch((e) => {
+    console.error(e);
+    $('#view').innerHTML = vazio('Não foi possível iniciar', 'Verifique a internet e abra o app de novo.');
+  });
+} else {
+  usarStore(new LocalStore());
+  ui.tela = 'app';
+  render();
+}
+
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-// Pede ao navegador para não apagar os dados locais por falta de espaço
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 // Exposto só para testes
-window.__despensa = { processarCodigo, get state() { return state; }, scan };
+window.__despensa = { processarCodigo, get state() { return S(); }, get store() { return store; }, scan, nuvem };

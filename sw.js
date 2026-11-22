@@ -1,9 +1,9 @@
 // Service worker: guarda os arquivos do app para abrir rápido e funcionar sem internet.
 // Ao publicar uma nova versão, aumente o número em CACHE.
-const CACHE = 'despensa-v2-1';
+const CACHE = 'despensa-v3-1';
 const ARQUIVOS = [
-  './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
-  'vendor/barcode-detector.js', 'vendor/zxing_reader.wasm',
+  './', 'index.html', 'styles.css', 'app.js', 'store.js', 'firebase-config.js', 'manifest.webmanifest',
+  'vendor/barcode-detector.js', 'vendor/zxing_reader.wasm', 'vendor/firebase.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 

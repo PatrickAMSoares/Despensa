@@ -226,3 +226,26 @@ fieldset.campo { border: 0; margin: 0; padding: 0; }
 .em-breve { margin: 8px 20px; padding: 24px 20px; background: var(--card); border: 1px solid var(--line); border-radius: 18px; }
 .em-breve h2 { margin: 0 0 8px; font-size: 17px; }
 .em-breve p { margin: 0; font-size: 14px; color: var(--muted); line-height: 1.5; }
+
+/* Etapa 3: login, casa e convite */
+body.sem-abas .tabbar { display: none; }
+body.sem-abas #app { padding-bottom: 32px; }
+.auth { padding: calc(48px + var(--safe-t)) 20px 32px; display: flex; flex-direction: column; gap: 16px; max-width: 480px; margin: 0 auto; }
+.auth h1 { margin: 0; font-family: 'Space Grotesk', Inter, sans-serif; font-size: 32px; letter-spacing: -0.5px; }
+.auth .sub { margin: 0; }
+.auth-logo { width: 64px; height: 64px; border-radius: 18px; background: var(--green); color: #fff; display: flex; align-items: center; justify-content: center; }
+.auth-logo svg { width: 32px; height: 32px; }
+.auth-form { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+.auth input[type="email"], .auth input[type="password"], .auth input[type="text"] {
+  height: 52px; padding: 0 14px; border-radius: 14px; border: 1px solid var(--line);
+  background: var(--card); font-size: 16px; width: 100%;
+}
+.auth input:focus { border: 2px solid var(--green); outline: none; }
+.auth-links { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.link { border: 0; background: none; color: var(--green); font-weight: 600; font-size: 15px; min-height: 44px; padding: 0 8px; }
+.erro { margin: 0; min-height: 0; font-size: 14px; color: var(--orange-text); }
+.erro:empty { display: none; }
+.card-op { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+.card-op h2 { margin: 0; font-size: 17px; }
+.card-op p { margin: 0; font-size: 14px; color: var(--muted); line-height: 1.45; }
+.codigo-grande { font-family: 'Space Grotesk', Inter, sans-serif; font-size: 34px; font-weight: 700; letter-spacing: 6px; }
