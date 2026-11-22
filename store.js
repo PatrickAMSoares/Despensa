@@ -4,7 +4,7 @@
 //
 // Mudança: { col: 'products'|'list', id, op: 'set'|'inc'|'delete', data }
 //   set    → grava o documento inteiro (data sem o id)
-//   inc    → soma valores numéricos (data.qty) — usa increment() na nuvem, então duas pessoas
+//   inc    → soma data.qty (os demais campos são gravados como estão) — usa increment() na nuvem, então duas pessoas
 //            lendo o mesmo produto ao mesmo tempo não se atropelam
 //   delete → remove
 
@@ -15,11 +15,18 @@ export const agoraISO = () => new Date().toISOString();
 export const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 
 const semId = ({ id, ...resto }) => resto;
+
+// Quantas unidades entram na despensa: itens vendidos por peso (kg) contam como 1
+export function qtdUnidades(it) {
+  const un = String(it.unit || '').toUpperCase();
+  if (/^(KG|G|GR|L|LT|ML|M)$/.test(un)) return 1;
+  return Math.max(1, Math.round(Number(it.qty) || 1));
+}
 const copia = (o) => JSON.parse(JSON.stringify(o));
 
 class BaseStore {
   constructor() {
-    this.state = { products: [], list: [] };
+    this.state = { products: [], list: [], purchases: [] };
     this.ouvintes = new Set();
   }
   aoMudar(fn) { this.ouvintes.add(fn); return () => this.ouvintes.delete(fn); }
@@ -37,7 +44,7 @@ class BaseStore {
       else if (m.op === 'set') { const d = { id: m.id, ...copia(m.data) }; if (i >= 0) arr[i] = d; else arr.push(d); }
       else if (m.op === 'inc' && i >= 0) {
         for (const [k, v] of Object.entries(m.data)) {
-          if (typeof v === 'number') arr[i][k] = (Number(arr[i][k]) || 0) + v; else arr[i][k] = v;
+          if (k === 'qty') arr[i][k] = (Number(arr[i][k]) || 0) + v; else arr[i][k] = v;
         }
       }
     }
@@ -143,11 +150,49 @@ class BaseStore {
     return marcados.length;
   }
 
+  /* ---------- compras (notas fiscais) ---------- */
+  // compra: { id (chave de acesso), date, store:{name,cnpj}, total, url, items:[{desc, code, qty, unit, unitPrice, total, productId}] }
+  // decisoes[i]: { acao: 'produto'|'novo'|'ignorar', productId?, novo?:{name, category, barcode} }
+  registrarCompra(compra, decisoes, { darEntrada = true } = {}) {
+    const mud = [];
+    const agora = agoraISO();
+    const items = compra.items.map((it, i) => {
+      const d = decisoes[i] || { acao: 'ignorar' };
+      const unidades = qtdUnidades(it);
+      if (d.acao === 'produto' && this.porId(d.productId)) {
+        const p = this.porId(d.productId);
+        const aliases = Array.from(new Set([...(p.notaAliases || []), norm(it.desc)])).slice(-10);
+        const campos = { updatedAt: agora, notaAliases: aliases, lastPrice: it.unitPrice, lastPriceAt: compra.date };
+        if (darEntrada) campos.qty = unidades;
+        mud.push({ col: 'products', id: p.id, op: 'inc', data: campos });
+        if (darEntrada) mud.push(...this.tirarDaListaMud(p.id));
+        return { ...it, productId: p.id };
+      }
+      if (d.acao === 'novo' && d.novo) {
+        const id = uid();
+        mud.push({ col: 'products', id, op: 'set', data: {
+          barcode: d.novo.barcode || null, name: d.novo.name, category: d.novo.category,
+          qty: darEntrada ? unidades : 0, createdAt: agora, updatedAt: agora,
+          notaAliases: [norm(it.desc)], lastPrice: it.unitPrice, lastPriceAt: compra.date,
+        } });
+        return { ...it, productId: id, category: d.novo.category };
+      }
+      return { ...it, productId: null };
+    });
+    // categoria de cada item fica guardada na compra (para o gasto por categoria não mudar se o produto for editado)
+    const itensFinal = items.map((it) => ({ ...it, category: it.category || this.porId(it.productId)?.category || it.categoryGuess || 'Outros' }));
+    mud.push({ col: 'purchases', id: compra.id, op: 'set', data: { ...semId(compra), items: itensFinal, createdAt: agora } });
+    this.commit(mud);
+    return { itens: itensFinal.length, vinculados: itensFinal.filter((x) => x.productId).length };
+  }
+
+  excluirCompra(id) { this.commit([{ col: 'purchases', id, op: 'delete' }]); }
+
   // Volta ao estado de uma foto anterior (usado pelo "Desfazer"): grava só o que mudou.
   restaurar(antes) {
     const mud = [];
-    for (const col of ['products', 'list']) {
-      const ant = new Map(antes[col].map((x) => [x.id, x]));
+    for (const col of ['products', 'list', 'purchases']) {
+      const ant = new Map((antes[col] || []).map((x) => [x.id, x]));
       const atual = new Map(this.state[col].map((x) => [x.id, x]));
       for (const [id, x] of ant) if (JSON.stringify(x) !== JSON.stringify(atual.get(id))) mud.push({ col, id, op: 'set', data: semId(x) });
       for (const id of atual.keys()) if (!ant.has(id)) mud.push({ col, id, op: 'delete' });
@@ -157,7 +202,7 @@ class BaseStore {
 
   substituirTudo(dados) {
     const mud = [];
-    for (const col of ['products', 'list']) {
+    for (const col of ['products', 'list', 'purchases']) {
       this.state[col].forEach((x) => mud.push({ col, id: x.id, op: 'delete' }));
       (dados[col] || []).forEach((x) => mud.push({ col, id: x.id || uid(), op: 'set', data: semId(x) }));
     }
@@ -184,6 +229,11 @@ class BaseStore {
       if (pid && this.state.list.some((x) => x.productId === pid)) continue;
       mud.push({ col: 'list', id: uid(), op: 'set', data: { ...semId(i), productId: pid } });
     }
+    for (const c of dados.purchases || []) {
+      if (this.state.purchases.some((x) => x.id === c.id)) continue;
+      const items = (c.items || []).map((it) => ({ ...it, productId: it.productId ? mapaIds[it.productId] || null : null }));
+      mud.push({ col: 'purchases', id: c.id || uid(), op: 'set', data: { ...semId(c), items } });
+    }
     return this.commit(mud);
   }
 }
@@ -195,7 +245,7 @@ export class LocalStore extends BaseStore {
     this.modo = 'local';
     try {
       const s = JSON.parse(localStorage.getItem(KEY_LOCAL));
-      if (s && Array.isArray(s.products)) this.state = { products: s.products, list: Array.isArray(s.list) ? s.list : [] };
+      if (s && Array.isArray(s.products)) this.state = { products: s.products, list: Array.isArray(s.list) ? s.list : [], purchases: Array.isArray(s.purchases) ? s.purchases : [] };
     } catch { /* começa vazio */ }
     this.pronto = Promise.resolve();
   }
@@ -214,19 +264,20 @@ export class CloudStore extends BaseStore {
     this.db = db;
     this.hid = hid;
     this.casa = null;
-    this.carregados = { products: false, list: false };
+    this.carregados = { products: false, list: false, purchases: false };
     let liberar;
     this.pronto = new Promise((r) => { liberar = r; });
     const { collection, onSnapshot, doc } = fb;
     const ouvir = (col) => onSnapshot(collection(db, 'households', hid, col), { includeMetadataChanges: false }, (snap) => {
       this.state[col] = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       this.carregados[col] = true;
-      if (this.carregados.products && this.carregados.list) liberar();
+      if (this.carregados.products && this.carregados.list && this.carregados.purchases) liberar();
       this.avisar();
     }, (err) => { console.error('snapshot', col, err); this.erro = err; liberar(); this.avisar(); });
     this.cancelar = [
       ouvir('products'),
       ouvir('list'),
+      ouvir('purchases'),
       onSnapshot(doc(db, 'households', hid), (d) => { this.casa = d.exists() ? d.data() : null; this.avisar(); }, () => {}),
     ];
   }
@@ -242,7 +293,7 @@ export class CloudStore extends BaseStore {
         else if (m.op === 'set') lote.set(ref, m.data);
         else if (m.op === 'inc') {
           const d = {};
-          for (const [k, v] of Object.entries(m.data)) d[k] = typeof v === 'number' ? increment(v) : v;
+          for (const [k, v] of Object.entries(m.data)) d[k] = k === 'qty' ? increment(v) : v;
           lote.update(ref, d);
         }
       }

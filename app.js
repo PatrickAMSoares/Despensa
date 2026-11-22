@@ -1,8 +1,9 @@
 // Despensa — etapa 3: login e despensa compartilhada pela casa (Firebase).
 // Sem firebase-config.js preenchido, funciona em modo local (só neste aparelho).
 
-import { firebaseConfig as configArquivo } from './firebase-config.js';
+import { firebaseConfig as configArquivo, proxyNotas } from './firebase-config.js';
 import { LocalStore, CloudStore, KEY_LOCAL, uid, norm } from './store.js';
+import { lerLinkNota, buscarPaginaNota, interpretarNota, vincularItens, nomeBonito, eanValido } from './nota.js';
 
 const CATEGORIAS = ['Mercearia', 'Bebidas', 'Limpeza', 'Higiene', 'Hortifrúti', 'Carnes/Frios', 'Congelados', 'Outros'];
 const KEY_MODO = 'despensa.modo';
@@ -34,9 +35,9 @@ const qtdDe = (p) => Math.max(0, Number(p.qty) || 0);
 /* ---------- estado ---------- */
 let store = null;           // LocalStore ou CloudStore
 const nuvem = { fb: null, auth: null, db: null, user: null };
-const ui = { tela: 'carregando', tab: 'despensa', busca: '', cat: 'Todas', modoLogin: 'entrar', ocupado: false };
+const ui = { tela: 'carregando', tab: 'despensa', busca: '', cat: 'Todas', modoLogin: 'entrar', ocupado: false, mes: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; })() };
 
-const S = () => (store ? store.state : { products: [], list: [] });
+const S = () => (store ? store.state : { products: [], list: [], purchases: [] });
 
 function usarStore(novo) {
   if (store) store.parar();
@@ -69,7 +70,8 @@ function render() {
   }
   if (ui.tab === 'despensa') v.innerHTML = telaDespensa();
   else if (ui.tab === 'compras') v.innerHTML = telaCompras();
-  else v.innerHTML = telaEmBreve(ui.tab);
+  else if (ui.tab === 'notas') v.innerHTML = telaNotas();
+  else v.innerHTML = telaGastos();
 }
 
 function agrupar(itens) {
@@ -224,7 +226,7 @@ function telaCompras() {
     ${corpo}
     <div class="acoes">
       ${marcados ? `<button class="btn primary" type="button" data-act="guardar">Guardar ${plural(marcados, 'item', 'itens')} na despensa</button>` : ''}
-      <button class="btn ghost" type="button" disabled>Ler QR Code da nota · chega na etapa 4</button>
+      <button class="btn dark" type="button" data-act="ler-nota">Ler QR Code da nota fiscal</button>
     </div>`;
 }
 
@@ -240,12 +242,293 @@ function linhaCompra(i) {
     </div>`;
 }
 
-function telaEmBreve(tab) {
-  const t = tab === 'notas'
-    ? ['Notas fiscais', 'Leitura do QR Code da NFC-e', 'Na etapa 4 você lê o QR Code da nota e o app dá entrada em todos os itens de uma vez, guardando o preço de cada um.']
-    : ['Gastos', 'Gastos por mês e preço por item', 'Na etapa 4, com os dados das notas, esta tela mostra o total por mês, por categoria e a variação de preço de cada produto.'];
-  return `<header class="top"><div><h1>${t[0]}</h1><p class="sub">Em construção</p></div></header>
-    <div class="em-breve"><h2>${t[1]}</h2><p>${t[2]}</p></div>`;
+/* ---------- notas fiscais ---------- */
+const brl = (n) => (Number(n) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const fmtDataLonga = (iso) => new Date(iso).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+const NOMES_MES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+const mesDe = (iso) => {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
+function telaNotas() {
+  const compras = [...S().purchases].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const ativo = !!proxyNotas;
+  const lista = compras.length
+    ? `<div class="lista"><div class="card">${compras.map((c) => `
+        <button type="button" class="row row-compra" data-act="ver-compra" data-id="${esc(c.id)}">
+          <span class="row-main" style="pointer-events:none">
+            <span class="nome">${esc(c.store?.name || 'Compra')}</span>
+            <span class="info">${fmtDataLonga(c.date)} · ${c.items?.length ? plural(c.items.length, 'item', 'itens') : 'só o total'}</span>
+          </span>
+          <strong class="valor">${brl(c.total)}</strong>
+        </button>`).join('')}</div></div>`
+    : vazio('Nenhuma nota ainda', 'Depois de uma compra, leia o QR Code da nota fiscal: o app dá entrada nos produtos e guarda o preço de cada um.');
+  return `
+    <header class="top"><div><h1>Notas</h1><p class="sub">${plural(compras.length, 'compra registrada', 'compras registradas')}</p></div></header>
+    <div class="acoes" style="padding-top:0;padding-bottom:16px">
+      ${ativo
+        ? `<button class="btn primary" type="button" data-act="ler-nota">Ler QR Code da nota fiscal</button>
+           <button class="btn ghost" type="button" data-act="colar-link">Colar link da nota</button>`
+        : '<div class="aviso">' + ICON.alert + '<span>A leitura de notas ainda não foi ativada (falta publicar a função de consulta à Fazenda).</span></div>'}
+    </div>
+    ${lista}`;
+}
+
+function telaGastos() {
+  const compras = S().purchases;
+  const [ano, mes] = ui.mes.split('-').map(Number);
+  const doMes = compras.filter((c) => mesDe(c.date) === ui.mes);
+  const total = doMes.reduce((s, c) => s + (Number(c.total) || 0), 0);
+  const mesAnt = mesDe(new Date(ano, mes - 2, 15).toISOString());
+  const totalAnt = compras.filter((c) => mesDe(c.date) === mesAnt).reduce((s, c) => s + (Number(c.total) || 0), 0);
+  const variacao = totalAnt > 0 ? ((total - totalAnt) / totalAnt) * 100 : null;
+
+  // últimos 6 meses
+  const meses = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(ano, mes - 1 - i, 15);
+    const chave = mesDe(d.toISOString());
+    meses.push({ chave, nome: NOMES_MES[d.getMonth()], valor: compras.filter((c) => mesDe(c.date) === chave).reduce((s, c) => s + (Number(c.total) || 0), 0) });
+  }
+  const max = Math.max(...meses.map((m) => m.valor), 1);
+
+  // por categoria
+  const cats = {};
+  for (const c of doMes) {
+    if (!c.items?.length) { cats['Sem detalhe'] = (cats['Sem detalhe'] || 0) + (Number(c.total) || 0); continue; }
+    for (const it of c.items) {
+      const cat = (it.productId && store.porId(it.productId)?.category) || it.category || 'Outros';
+      cats[cat] = (cats[cat] || 0) + (Number(it.total) || 0);
+    }
+  }
+  const listaCats = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+  const maxCat = Math.max(...listaCats.map((c) => c[1]), 1);
+
+  // variação de preço por produto (último preço x anterior)
+  const historico = {};
+  for (const c of [...compras].sort((a, b) => String(a.date).localeCompare(String(b.date)))) {
+    for (const it of c.items || []) {
+      if (!it.productId || !(it.unitPrice > 0)) continue;
+      (historico[it.productId] ||= []).push({ preco: it.unitPrice, data: c.date });
+    }
+  }
+  const variacoes = Object.entries(historico)
+    .map(([pid, h]) => {
+      const ult = h[h.length - 1];
+      const ant = [...h].reverse().find((x) => x.data !== ult.data); // compra anterior (outra nota)
+      if (!ant) return null;
+      return { nome: store.porId(pid)?.name || 'Produto', ult, ant, pct: ((ult.preco - ant.preco) / ant.preco) * 100 };
+    })
+    .filter((x) => x && Math.abs(x.pct) >= 0.5)
+    .sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct))
+    .slice(0, 8);
+
+  const nomeMes = new Date(ano, mes - 1, 15).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+  const nomeMesCap = nomeMes.charAt(0).toUpperCase() + nomeMes.slice(1);
+  return `
+    <header class="top">
+      <div><h1>Gastos</h1></div>
+      <div class="mes-nav">
+        <button class="icon-btn" type="button" data-act="mes-ant" aria-label="Mês anterior"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button>
+        <span class="mes-nome">${esc(nomeMesCap)}</span>
+        <button class="icon-btn" type="button" data-act="mes-prox" aria-label="Próximo mês"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
+      </div>
+    </header>
+    <div class="lista">
+      <section class="card bloco">
+        <div class="total-linha">
+          <div><span class="info">Total no mês · ${plural(doMes.length, 'compra', 'compras')}</span><strong class="total-mes">${brl(total)}</strong></div>
+          ${variacao === null ? '' : `<span class="tag ${variacao > 0 ? 'warn' : 'bom'}">${variacao > 0 ? '+' : ''}${variacao.toFixed(0)}% vs ${NOMES_MES[(mes + 10) % 12]}.</span>`}
+        </div>
+        <div class="barras" role="img" aria-label="Gasto nos últimos 6 meses">
+          ${meses.map((m) => `
+            <div class="barra-col" title="${esc(brl(m.valor))}">
+              <div class="barra ${m.chave === ui.mes ? 'atual' : ''}" style="height:${Math.max(3, Math.round((m.valor / max) * 96))}px"></div>
+              <span>${m.nome}</span>
+            </div>`).join('')}
+        </div>
+      </section>
+      ${doMes.length ? `
+      <section class="card bloco">
+        <h2 class="bloco-tit">Por categoria</h2>
+        ${listaCats.map(([nome, v]) => `
+          <div class="cat-linha">
+            <div class="cat-topo"><span>${esc(nome)}</span><strong>${brl(v)}</strong></div>
+            <div class="cat-trilho"><div style="width:${Math.round((v / maxCat) * 100)}%"></div></div>
+          </div>`).join('')}
+      </section>` : vazio('Sem compras neste mês', 'Leia o QR Code das notas fiscais para ver os gastos aqui.')}
+      ${variacoes.length ? `
+      <section class="card bloco">
+        <h2 class="bloco-tit">Preço por item</h2>
+        ${variacoes.map((x) => `
+          <div class="preco-linha">
+            <span><span class="nome">${esc(x.nome)}</span><span class="info">Era ${brl(x.ant.preco)} em ${fmtData(x.ant.data)}</span></span>
+            <span class="preco-dir"><strong>${brl(x.ult.preco)}</strong><span class="${x.pct > 0 ? 'sobe' : 'desce'}">${x.pct > 0 ? '+' : ''}${x.pct.toFixed(1).replace('.', ',')}%</span></span>
+          </div>`).join('')}
+      </section>` : ''}
+    </div>`;
+}
+
+function colarLinkNota() {
+  const t = prompt('Cole o link da nota fiscal (o endereço que abre ao ler o QR Code com a câmera do iPhone):');
+  if (t) processarQRNota(t.trim());
+}
+
+let conferencia = null; // { compra, vinculos }
+
+async function processarQRNota(texto) {
+  const info = lerLinkNota(texto);
+  if (!info) {
+    if (!$('#scanner').hidden) {
+      $('#scan-card').innerHTML = `<div class="res-head"><span class="res-ico out">${ICON.alert}</span><span><span class="res-tit out">Não é uma nota fiscal</span><span class="res-nome" style="font-size:14px">Esse QR Code não tem o link da Fazenda. Procure o QR Code no rodapé da nota.</span></span></div>`;
+    } else toast('Esse link não é de uma nota fiscal (NFC-e).');
+    return;
+  }
+  if (!$('#scanner').hidden) fecharLeitor();
+  const existente = S().purchases.find((c) => c.id === info.chave);
+  if (existente) { toast(`Essa nota já foi registrada (${fmtDataLonga(existente.date)}).`); abrirCompra(existente.id); return; }
+  if (!proxyNotas) { toast('A leitura de notas ainda não foi ativada.'); return; }
+
+  abrirSheet(`<div class="carregando-nota"><span class="res-ico neutro">${ICON.loading}</span><h2>Consultando a nota na Fazenda…</h2><p class="nota-local">Pode levar alguns segundos.</p></div>`);
+  let compra;
+  try {
+    const html = await buscarPaginaNota(proxyNotas, info.url);
+    compra = interpretarNota(html, info);
+  } catch (e) {
+    fecharSheet();
+    abrirSheet(falhaNota(info, e.amigavel ? e.message : 'Não consegui ler a página da nota.'));
+    return;
+  }
+  if (!compra.items.length) {
+    fecharSheet();
+    abrirSheet(falhaNota(info, 'A Fazenda respondeu, mas não consegui identificar os itens desta nota.', compra));
+    conferencia = { compra, vinculos: [] };
+    return;
+  }
+  fecharSheet();
+  abrirConferencia(compra);
+}
+
+function falhaNota(info, msg, compra) {
+  return `
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <h2>Não deu certo</h2>
+      <div class="aviso">${ICON.alert}<span>${esc(msg)}</span></div>
+      <p class="nota-local">O formato da página da Fazenda pode ter mudado. Copie o link e envie para ajustarmos a leitura.</p>
+      <div class="sheet-acoes">
+        ${compra && compra.totalEncontrado ? `<button class="btn primary" type="button" data-act="so-total">Registrar só o total (${brl(compra.total)})</button>` : ''}
+        <button class="btn ghost" type="button" data-act="copiar-link" data-link="${esc(info.url)}">Copiar link da nota</button>
+        <a class="btn ghost" href="${esc(info.url)}" target="_blank" rel="noopener" style="text-decoration:none">Abrir a nota na Fazenda</a>
+        <button class="btn ghost" type="button" data-act="fechar-sheet">Fechar</button>
+      </div>
+    </div>`;
+}
+
+function salvarSoTotal() {
+  if (!conferencia) return;
+  store.registrarCompra({ ...conferencia.compra, items: [] }, []);
+  conferencia = null;
+  fecharSheet();
+  ui.tab = 'notas';
+  render();
+  toast('Compra registrada (só o total).');
+}
+
+function abrirConferencia(compra) {
+  const prods = [...S().products].sort((a, b) => String(a.name).localeCompare(String(b.name), 'pt-BR'));
+  const vinculos = vincularItens(compra.items, prods);
+  conferencia = { compra, vinculos };
+  const n = { certo: 0, sugestao: 0, novo: 0 };
+  vinculos.forEach((v) => { n[v.status]++; });
+  const opcoes = (v, it) => `
+    <option value="novo" ${v.status === 'novo' ? 'selected' : ''}>＋ Novo produto: ${esc(nomeBonito(it.desc))}</option>
+    <option value="ignorar">Não guardar na despensa</option>
+    <optgroup label="Produtos da despensa">
+      ${prods.map((p) => `<option value="p:${p.id}" ${v.productId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+    </optgroup>`;
+  const ROTULO = { certo: 'reconhecido', sugestao: 'confira', novo: 'novo' };
+  abrirSheet(`
+    <div class="conf">
+      <div class="conf-topo">
+        <div><strong>${esc(compra.store.name)}</strong><span>${fmtDataLonga(compra.date)} · NFC-e</span></div>
+        <strong class="conf-total">${brl(compra.total)}</strong>
+      </div>
+      <div class="conf-resumo">
+        <span class="pill certo"><b>${n.certo}</b> reconhecidos</span>
+        <span class="pill sugestao"><b>${n.sugestao}</b> confira</span>
+        <span class="pill novo"><b>${n.novo}</b> novos</span>
+      </div>
+      <label class="conf-entrada">
+        <span><strong>Dar entrada na despensa</strong><span class="info">Soma as quantidades e tira os itens da lista de compras</span></span>
+        <input type="checkbox" id="conf-entrada" checked>
+      </label>
+      <p class="nota-local">Confira os itens em laranja. Em cada item, escolha o produto da despensa, "Novo produto" ou "Não guardar". O app lembra a escolha nas próximas notas.</p>
+      <div class="card">
+        ${compra.items.map((it, i) => `
+          <div class="conf-item ${vinculos[i].status}">
+            <div class="conf-linha">
+              <span class="conf-desc">${esc(it.desc)}</span>
+              <strong>${brl(it.total)}</strong>
+            </div>
+            <span class="info">${String(it.qty).replace('.', ',')} ${esc(it.unit)} × ${brl(it.unitPrice)} · <span class="st">${ROTULO[vinculos[i].status]}</span></span>
+            <label class="sr" for="conf-${i}">Produto para ${esc(it.desc)}</label>
+            <select id="conf-${i}" data-i="${i}">${opcoes(vinculos[i], it)}</select>
+          </div>`).join('')}
+      </div>
+      ${Math.abs(compra.items.reduce((s, it) => s + it.total, 0) - compra.total) > 0.05 && compra.totalEncontrado
+        ? `<p class="nota-local">Soma dos itens: ${brl(compra.items.reduce((s, it) => s + it.total, 0))} (diferença de descontos ou acréscimos da nota).</p>` : ''}
+      <div class="sheet-acoes">
+        <button class="btn primary" type="button" data-act="salvar-compra">Salvar compra</button>
+        <button class="btn ghost" type="button" data-act="fechar-sheet">Cancelar</button>
+      </div>
+    </div>`);
+}
+
+function salvarConferencia() {
+  if (!conferencia) return;
+  const { compra } = conferencia;
+  const decisoes = compra.items.map((it, i) => {
+    const v = $(`#conf-${i}`)?.value || 'ignorar';
+    if (v.startsWith('p:')) return { acao: 'produto', productId: v.slice(2) };
+    if (v === 'novo') {
+      const code = eanValido(it.code) ? it.code : null;
+      return { acao: 'novo', novo: { name: nomeBonito(it.desc), category: it.categoryGuess || 'Mercearia', barcode: code && !store.porCodigo(code) ? code : null } };
+    }
+    return { acao: 'ignorar' };
+  });
+  const darEntrada = $('#conf-entrada')?.checked !== false;
+  const snap = store.foto();
+  const r = store.registrarCompra(compra, decisoes, { darEntrada });
+  conferencia = null;
+  fecharSheet();
+  ui.tab = 'notas';
+  render();
+  toast(`Compra salva: ${plural(r.vinculados, 'item', 'itens')} na despensa.`, { acao: 'Desfazer', fn: () => store.restaurar(snap) });
+}
+
+function abrirCompra(id) {
+  const c = S().purchases.find((x) => x.id === id);
+  if (!c) return;
+  abrirSheet(`
+    <div class="conf">
+      <div class="conf-topo">
+        <div><strong>${esc(c.store?.name || 'Compra')}</strong><span>${fmtDataLonga(c.date)}</span></div>
+        <strong class="conf-total">${brl(c.total)}</strong>
+      </div>
+      ${c.items?.length ? `<div class="card">${c.items.map((it) => {
+        const p = it.productId ? store.porId(it.productId) : null;
+        return `<div class="conf-item">
+          <div class="conf-linha"><span class="conf-desc">${esc(p ? p.name : it.desc)}</span><strong>${brl(it.total)}</strong></div>
+          <span class="info">${String(it.qty).replace('.', ',')} ${esc(it.unit)} × ${brl(it.unitPrice)}${p ? '' : ' · fora da despensa'}</span>
+        </div>`;
+      }).join('')}</div>` : '<p class="nota-local">Compra registrada só com o valor total.</p>'}
+      <div class="sheet-acoes">
+        ${c.url ? `<a class="btn ghost" href="${esc(c.url)}" target="_blank" rel="noopener" style="text-decoration:none">Abrir a nota na Fazenda</a>` : ''}
+        <button class="btn danger" type="button" data-act="excluir-compra" data-id="${esc(c.id)}">Excluir compra</button>
+        <button class="btn ghost" type="button" data-act="fechar-sheet">Fechar</button>
+      </div>
+    </div>`);
 }
 
 /* ---------- painel inferior ---------- */
@@ -442,13 +725,14 @@ function toast(msg, { acao, fn } = {}) {
 /* ---------- leitor de código de barras ---------- */
 const scan = {
   stream: null, detector: null, timer: null, ocupado: false, pausado: false,
-  ultimo: '', ultimoEm: 0, audio: null, ultimoSnap: null,
+  ultimo: '', ultimoEm: 0, audio: null, ultimoSnap: null, tipo: 'produto', detectorQR: null,
   modo: localStorage.getItem(KEY_MODO) === 'saida' ? 'saida' : 'entrada',
 };
 const quadro = document.createElement('canvas');
 const ctxQuadro = quadro.getContext('2d', { willReadFrequently: true });
 
 async function obterDetector() {
+  if (scan.tipo === 'nota') return obterDetectorQR();
   if (scan.detector) return scan.detector;
   const formatos = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'];
   if ('BarcodeDetector' in window) {
@@ -469,15 +753,38 @@ async function obterDetector() {
   return scan.detector;
 }
 
+async function obterDetectorQR() {
+  if (scan.detectorQR) return scan.detectorQR;
+  if ('BarcodeDetector' in window) {
+    try {
+      const sup = await window.BarcodeDetector.getSupportedFormats();
+      if (sup.includes('qr_code')) { scan.detectorQR = new window.BarcodeDetector({ formats: ['qr_code'] }); return scan.detectorQR; }
+    } catch { /* usa o leitor embutido */ }
+  }
+  const api = window.BarcodeDetectionAPI;
+  if (!api) throw new Error('leitor-indisponivel');
+  api.setZXingModuleOverrides({
+    locateFile: (path, prefix) => (path.endsWith('.wasm') ? new URL(`vendor/${path}`, location.href).href : prefix + path),
+  });
+  scan.detectorQR = new api.BarcodeDetector({ formats: ['qr_code'] });
+  return scan.detectorQR;
+}
+
 function atualizarModo() {
   const s = $('#scanner');
   s.classList.toggle('modo-entrada', scan.modo === 'entrada');
   s.classList.toggle('modo-saida', scan.modo === 'saida');
   s.querySelectorAll('[data-mode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === scan.modo)));
+  s.classList.toggle('tipo-nota', scan.tipo === 'nota');
+  $('.scan-title', s).textContent = scan.tipo === 'nota' ? 'Ler QR Code da nota' : 'Ler código de barras';
+  $('.scan-hint', s).innerHTML = scan.tipo === 'nota'
+    ? 'Aponte para o QR Code no rodapé da nota.'
+    : 'Aponte para o código de barras.<br>Leitura contínua: vá passando os produtos.';
 }
 
-async function abrirLeitor() {
+async function abrirLeitor(tipo = 'produto') {
   if (ui.tela !== 'app') return;
+  scan.tipo = tipo;
   $('#scanner').hidden = false;
   document.body.classList.add('no-scroll');
   atualizarModo();
@@ -531,10 +838,11 @@ async function lacoLeitura() {
     scan.ocupado = true;
     try {
       const w = v.videoWidth, h = v.videoHeight;
-      const cw = Math.round(w * 0.85), ch = Math.round(h * 0.5);
+      let cw = Math.round(w * 0.85), ch = Math.round(h * 0.5);
+      if (scan.tipo === 'nota') { cw = ch = Math.round(Math.min(w, h) * 0.8); } // QR Code: área quadrada maior
       quadro.width = cw; quadro.height = ch;
       ctxQuadro.drawImage(v, (w - cw) / 2, (h - ch) / 2, cw, ch, 0, 0, cw, ch);
-      const res = await scan.detector.detect(quadro);
+      const res = await (scan.tipo === 'nota' ? scan.detectorQR : scan.detector).detect(quadro);
       if (res.length && !scan.pausado) aoLerCodigo(res[0].rawValue);
     } catch (e) { console.warn('leitura', e); }
     scan.ocupado = false;
@@ -548,6 +856,7 @@ function aoLerCodigo(code) {
   scan.ultimo = code;
   scan.ultimoEm = t;
   bip();
+  if (scan.tipo === 'nota') { processarQRNota(code); return; }
   processarCodigo(code);
 }
 
@@ -673,6 +982,12 @@ function digitarCodigo() {
 }
 
 function cartaoInicial() {
+  if (scan.tipo === 'nota') {
+    $('#scan-card').innerHTML = `
+      <p class="res-nota"><strong>Nota fiscal:</strong> o app consulta a nota na Fazenda e mostra os itens para você conferir antes de salvar.</p>
+      <button class="btn ghost" type="button" data-act="colar-link" style="min-height:48px">Colar link da nota</button>`;
+    return;
+  }
   $('#scan-card').innerHTML = `
     <p class="res-nota">${scan.modo === 'entrada'
       ? '<strong>Comprei:</strong> cada leitura soma 1 unidade. Produto novo? O app pede o nome uma única vez.'
@@ -870,7 +1185,33 @@ document.addEventListener('click', async (e) => {
   if (!el) return;
   const id = el.dataset.id;
   switch (el.dataset.act) {
-    case 'ler': abrirLeitor(); break;
+    case 'ler': abrirLeitor('produto'); break;
+    case 'ler-nota': abrirLeitor('nota'); break;
+    case 'colar-link': if (!$('#scanner').hidden) fecharLeitor(); colarLinkNota(); break;
+    case 'ver-compra': abrirCompra(id); break;
+    case 'excluir-compra': {
+      const c = S().purchases.find((x) => x.id === id);
+      if (c && confirm('Excluir esta compra do histórico de gastos? As quantidades da despensa não mudam.')) {
+        const snap = store.foto();
+        store.excluirCompra(id);
+        fecharSheet();
+        toast('Compra excluída.', { acao: 'Desfazer', fn: () => store.restaurar(snap) });
+      }
+      break;
+    }
+    case 'salvar-compra': salvarConferencia(); break;
+    case 'so-total': salvarSoTotal(); break;
+    case 'copiar-link': {
+      try { await navigator.clipboard.writeText(el.dataset.link); toast('Link copiado.'); } catch { toast(el.dataset.link); }
+      break;
+    }
+    case 'mes-ant': case 'mes-prox': {
+      const [a, m] = ui.mes.split('-').map(Number);
+      const d = new Date(a, m - 1 + (el.dataset.act === 'mes-prox' ? 1 : -1), 1);
+      ui.mes = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      render();
+      break;
+    }
     case 'fechar-leitor': fecharLeitor(); break;
     case 'digitar': digitarCodigo(); break;
     case 'cartao-inicial': cartaoInicial(); break;
@@ -1034,4 +1375,4 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 // Exposto só para testes
-window.__despensa = { processarCodigo, get state() { return S(); }, get store() { return store; }, scan, nuvem };
+window.__despensa = { processarCodigo, processarQRNota, abrirConferencia, get state() { return S(); }, get store() { return store; }, scan, nuvem };

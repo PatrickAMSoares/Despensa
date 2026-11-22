@@ -20,7 +20,17 @@ Web app instalável no iPhone (PWA). Não precisa de build: são só arquivos es
 - Na primeira entrada, o app oferece enviar para a casa os produtos que estavam só no aparelho.
 - Enquanto `firebase-config.js` estiver com `null`, o app continua no modo local.
 
-Notas e Gastos aparecem como "em construção" (etapa 4).
+## Etapa 4: nota fiscal, preços e gastos
+- Leitura do **QR Code da NFC-e** (ou colar o link). O app consulta a nota na Fazenda e mostra os itens para conferir.
+- Cada item é ligado a um produto da despensa: pelo código de barras, pelo nome já usado em notas anteriores ou por semelhança de nome (nesse caso marcado como "confira").
+- "Dar entrada na despensa" soma as quantidades de uma vez (itens por kg contam como 1) e tira os itens da lista de compras.
+- **Notas**: histórico de compras. **Gastos**: total por mês, comparação com o mês anterior, gasto por categoria e variação de preço por produto.
+- Se a página da nota não puder ser lida, dá para registrar só o total.
+
+### Função de consulta (proxy)
+O navegador não pode ler a página da Fazenda diretamente (bloqueio CORS). A pasta `proxy/` tem uma função do Netlify que faz essa consulta, aceitando só endereços `.gov.br` de NFC-e e respondendo só ao app.
+1. No Netlify: **Add new site › Import an existing project › GitHub ›** repositório `despensa` › **Base directory: `proxy`** › Deploy.
+2. Copie o endereço do site (ex.: `https://despensa-nfce.netlify.app`) e coloque em `firebase-config.js`: `export const proxyNotas = 'https://despensa-nfce.netlify.app/nfce';`
 
 ## Configurar o Firebase (uma vez)
 1. Em https://console.firebase.google.com, crie um projeto (o Google Analytics não é necessário).
@@ -48,6 +58,8 @@ Se a câmera foi negada: Ajustes › Apps › Safari › Câmera › Permitir. D
 - `store.js`: camada de dados (local ou Firestore).
 - `firebase-config.js`: configuração do Firebase (null = modo local).
 - `firestore.rules`: regras de segurança do Firestore.
+- `nota.js`: leitura e interpretação da NFC-e, vínculo item → produto.
+- `proxy/`: função do Netlify que consulta a nota na Fazenda.
 - `sw.js`: cache offline. Ao publicar mudanças, aumente a versão na constante `CACHE`.
 - `vendor/`: leitor de código (barcode-detector + zxing-wasm, MIT) e SDK do Firebase empacotado (Apache 2.0).
 - `netlify.toml`: cabeçalhos de cache.

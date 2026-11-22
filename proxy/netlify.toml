@@ -1,0 +1,6 @@
+# Site separado no Netlify só para a função que consulta a nota fiscal na Fazenda.
+# No Netlify: Add new site › Import from GitHub › repositório despensa › Base directory: proxy
+[build]
+  base = "proxy"
+  publish = "public"
+  functions = "netlify/functions"
