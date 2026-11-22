@@ -314,3 +314,12 @@ body.sem-abas #app { padding-bottom: 32px; }
   padding: 0 10px; font-size: 16px; color: var(--text);
 }
 .conf-item.sugestao select { border-color: #E8C8B5; }
+
+/* Foto da nota */
+.dicas { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 15px; line-height: 1.4; }
+.progresso { width: 100%; height: 8px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
+.progresso div { height: 8px; width: 0; background: var(--green); transition: width .2s; }
+.alerta-item { font-size: 12px; font-weight: 700; color: var(--orange-text); }
+.edita-item { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.edita-item label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.edita-item input { height: 44px; border-radius: 10px; border: 1px solid #E8C8B5; background: var(--card); padding: 0 10px; font-size: 16px; width: 100%; }

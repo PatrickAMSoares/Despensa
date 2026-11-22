@@ -190,10 +190,18 @@ function semelhanca(a, b) {
 
 // Para cada item: { status: 'certo'|'sugestao'|'novo', productId }
 export function vincularItens(itens, produtos) {
-  return itens.map((it) => {
+  return itens.map((it) => vincularUm(it, produtos)).map((v, i) => (
+    itens[i].alertas && itens[i].alertas.length && v.status === 'certo' ? { ...v, status: 'sugestao' } : v));
+}
+
+function vincularUm(it, produtos) {
     if (eanValido(it.code)) {
       const p = produtos.find((x) => x.barcode === it.code || x.barcode === it.code.replace(/^0+/, ''));
       if (p) return { status: 'certo', productId: p.id };
+    }
+    if (it.code && it.code.length >= 8 && !eanValido(it.code)) {
+      const quase = codigoParecido(it.code, produtos);
+      if (quase) return { status: 'sugestao', productId: quase.id };
     }
     const d = norm(it.desc);
     const porApelido = produtos.find((p) => (p.notaAliases || []).includes(d));
@@ -205,7 +213,6 @@ export function vincularItens(itens, produtos) {
     }
     if (melhor && nota >= 0.34) return { status: 'sugestao', productId: melhor.id };
     return { status: 'novo', productId: null };
-  });
 }
 
 // "ARROZ T1 CAMIL 5KG" → "Arroz T1 Camil 5kg"
@@ -228,4 +235,106 @@ export function categoriaPelaDescricao(desc) {
   if (tem('carne', 'frango', 'presunto', 'queijo', 'mortadela', 'linguica', 'salsicha', 'bacon', 'peito', 'coxa', 'file', 'patinho', 'acem', 'costela', 'mussarela', 'salame', 'peixe', 'tilapia')) return 'Carnes/Frios';
   if (tem('banana', 'maca', 'tomate', 'cebola', 'batata', 'alface', 'laranja', 'limao', 'cenoura', 'alho', 'mamao', 'uva', 'abacate', 'pepino', 'abobora', 'repolho', 'brocolis', 'melancia', 'morango', 'pera')) return 'Hortifrúti';
   return 'Mercearia';
+}
+
+/* ---------- foto da nota (texto vindo do OCR) ---------- */
+const UNIDADES = 'UN|UND|UNID|UM|KG|PC|PCT|PT|CX|LT|L|G|GR|ML|FD|DZ|BD|SC|FR|BJ|PAR|M';
+// Corrige letras que o OCR confunde com números (só em campos numéricos)
+const soNumero = (s) => String(s || '').replace(/[Oo]/g, '0').replace(/[Il|!]/g, '1').replace(/[S$]/g, '5').replace(/B/g, '8').replace(/Z/g, '2').replace(/[^\d]/g, '');
+const valor = (s) => num(String(s || '').replace(/[Oo]/g, '0').replace(/[Il]/g, '1').replace(/S/g, '5'));
+
+export function interpretarTextoNota(texto, info = {}) {
+  const linhas = String(texto || '').split(/\r?\n/).map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const itens = [];
+  const reUmaLinha = new RegExp(`^(?:\\S{1,4}\\s+)?([0-9OoIlSBZ]{1,14})\\s+(.+?)\\s+(\\d+(?:[.,]\\d{1,3})?)\\s*(${UNIDADES})\\b\\.?\\s*(?:[xX*]\\s*)?([\\dOoIlS]+[.,]\\d{2,3})\\s+([\\dOoIlS]+[.,]\\d{2})\\b`, 'i');
+  const reCodigoDesc = /^(?:\d{1,3}\s+)?(\d{6,14})\s+(.{3,})$/;
+  const reValores = new RegExp(`(\\d+(?:[.,]\\d{1,3})?)\\s*(${UNIDADES})\\b\\.?\\s*(?:[xX*]\\s*)?(\\d+[.,]\\d{2,3})\\s+(\\d+[.,]\\d{2})\\b`, 'i');
+
+  for (let i = 0; i < linhas.length; i++) {
+    const l = linhas[i];
+    if (/total|pagamento|troco|desconto|tributos|valor\s+a\s+pagar/i.test(l)) continue;
+    let m = l.match(reUmaLinha);
+    if (m && m[2].length >= 3 && /[a-z]{2}/i.test(m[2])) {
+      itens.push(itemFoto(m[1], m[2], m[3], m[4], m[5], m[6]));
+      continue;
+    }
+    // Layout em duas linhas: "001 7891234567890 ARROZ ..." / "1 UN x 27,90 27,90"
+    m = l.match(reCodigoDesc);
+    const prox = linhas[i + 1] || '';
+    const v = prox.match(reValores);
+    if (m && v && !reUmaLinha.test(prox)) {
+      itens.push(itemFoto(m[1], m[2], v[1], v[2], v[3], v[4]));
+      i++;
+    }
+  }
+
+  const tudo = linhas.join('\n');
+  const mTotal = tudo.match(/valor\s+(?:total|a\s+pagar|tot\S*)\s*(?:R\s*\$)?\s*:?\s*([\dOoIlS]+[.,]\d{2})/i)
+    || tudo.match(/total\s*(?:R\s*\$)\s*:?\s*([\dOoIlS]+[.,]\d{2})/i);
+  const total = mTotal ? valor(mTotal[1]) : NaN;
+
+  // chave de acesso: 44 dígitos (às vezes impressa em grupos de 4)
+  let chave = info.chave || null;
+  if (!chave) {
+    for (const l of linhas) {
+      const d = l.replace(/\s/g, '');
+      if (/^\d{44}$/.test(d)) { chave = d; break; }
+    }
+  }
+  const mData = tudo.match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/);
+  let data = null;
+  if (mData) {
+    const [, d, mo, a, h, mi, se = '00'] = mData;
+    const dt = new Date(`${a}-${mo}-${d}T${h}:${mi}:${se}-03:00`);
+    if (!Number.isNaN(dt.getTime())) data = dt.toISOString();
+  }
+  const linhaCnpj = linhas.find((l) => /cnpj/i.test(l)) || '';
+  let loja = linhaCnpj.replace(/.*cnpj\s*:?\s*[\d.\/\-\s,]{10,22}/i, '').trim();
+  if (!loja || loja.length < 3) loja = linhas[0] || 'Loja';
+  const cnpj = info.cnpj || (linhaCnpj.match(/(\d[\d.\/\-\s,]{12,20}\d)/) || [])[1]?.replace(/\D/g, '') || null;
+
+  const somaItens = Math.round(itens.reduce((s, it) => s + it.total, 0) * 100) / 100;
+  return {
+    id: chave || `foto-${(data || '').slice(0, 16)}-${Number.isFinite(total) ? total : somaItens}`,
+    chave,
+    url: info.url || (chave && chave.startsWith('42') ? 'https://sat.sef.sc.gov.br/nfce/consulta' : null),
+    fonte: 'foto',
+    date: data || new Date().toISOString(),
+    dataEncontrada: !!data,
+    store: { name: loja.slice(0, 80), cnpj },
+    total: Number.isFinite(total) ? total : somaItens,
+    totalEncontrado: Number.isFinite(total),
+    somaConfere: Number.isFinite(total) && Math.abs(total - somaItens) <= 0.05,
+    items: itens,
+  };
+}
+
+function itemFoto(cod, desc, qtd, un, unit, tot) {
+  const code = soNumero(cod);
+  let qty = valor(qtd);
+  const unitPrice = valor(unit);
+  const total = valor(tot);
+  if (!Number.isFinite(qty) || qty <= 0) qty = 1;
+  const unidade = String(un).toUpperCase().replace(/^UM$/, 'UN');
+  const contaFecha = Number.isFinite(unitPrice) && Number.isFinite(total) && Math.abs(qty * unitPrice - total) <= 0.02 + total * 0.002;
+  const codigoOk = code.length < 8 || eanValido(code);
+  const alertas = [];
+  if (!contaFecha) alertas.push('quantidade × preço não bate com o total');
+  if (!codigoOk) alertas.push('código de barras lido com erro');
+  const d = limpa(desc).replace(/\s+[A-Z]?\d?$/, (s) => (/\d/.test(s) && s.trim().length <= 2 ? '' : s));
+  return {
+    desc: d, code, qty, unit: unidade,
+    unitPrice: Number.isFinite(unitPrice) ? Math.round(unitPrice * 100) / 100 : Math.round((total / qty) * 100) / 100,
+    total: Number.isFinite(total) ? Math.round(total * 100) / 100 : Math.round(unitPrice * qty * 100) / 100,
+    categoryGuess: categoriaPelaDescricao(desc),
+    alertas,
+  };
+}
+
+// Código lido com 1 dígito errado: procura um produto da despensa com código quase igual
+export function codigoParecido(code, produtos) {
+  if (!code || code.length < 8) return null;
+  const candidatos = produtos.filter((p) => p.barcode && p.barcode.length === code.length
+    && [...p.barcode].filter((c, i) => c !== code[i]).length === 1);
+  return candidatos.length === 1 ? candidatos[0] : null;
 }

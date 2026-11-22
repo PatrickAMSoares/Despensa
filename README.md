@@ -25,7 +25,9 @@ Web app instalável no iPhone (PWA). Não precisa de build: são só arquivos es
 - Cada item é ligado a um produto da despensa: pelo código de barras, pelo nome já usado em notas anteriores ou por semelhança de nome (nesse caso marcado como "confira").
 - "Dar entrada na despensa" soma as quantidades de uma vez (itens por kg contam como 1) e tira os itens da lista de compras.
 - **Notas**: histórico de compras. **Gastos**: total por mês, comparação com o mês anterior, gasto por categoria e variação de preço por produto.
-- Se a página da nota não puder ser lida, dá para registrar só o total.
+- Se a consulta automática não funcionar (a SEF/SC exige uma validação de segurança feita por pessoa), o app pede uma **foto da nota** e lê o texto no próprio celular (OCR com Tesseract, sem enviar a imagem para fora).
+- Na foto, o código de barras é conferido pelo dígito verificador e quantidade × preço é conferido com o total do item; o que não fecha aparece em laranja para corrigir.
+- Se nada der certo, dá para registrar só o total.
 
 ### Função de consulta (proxy)
 O navegador não pode ler a página da Fazenda diretamente (bloqueio CORS). A pasta `proxy/` tem uma função do Netlify que faz essa consulta, aceitando só endereços `.gov.br` de NFC-e e respondendo só ao app.
@@ -58,8 +60,9 @@ Se a câmera foi negada: Ajustes › Apps › Safari › Câmera › Permitir. D
 - `store.js`: camada de dados (local ou Firestore).
 - `firebase-config.js`: configuração do Firebase (null = modo local).
 - `firestore.rules`: regras de segurança do Firestore.
-- `nota.js`: leitura e interpretação da NFC-e, vínculo item → produto.
+- `nota.js`: leitura e interpretação da NFC-e (página da Fazenda e texto da foto), vínculo item → produto.
+- `ocr.js`: leitura da foto da nota no celular (Tesseract.js, arquivos em `vendor/tesseract` e `vendor/tessdata`).
 - `proxy/`: função do Netlify que consulta a nota na Fazenda.
 - `sw.js`: cache offline. Ao publicar mudanças, aumente a versão na constante `CACHE`.
-- `vendor/`: leitor de código (barcode-detector + zxing-wasm, MIT) e SDK do Firebase empacotado (Apache 2.0).
+- `vendor/`: leitor de código (barcode-detector + zxing-wasm, MIT) SDK do Firebase empacotado (Apache 2.0) e Tesseract.js com dados de português (Apache 2.0).
 - `netlify.toml`: cabeçalhos de cache.

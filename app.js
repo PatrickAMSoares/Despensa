@@ -3,7 +3,7 @@
 
 import { firebaseConfig as configArquivo, proxyNotas } from './firebase-config.js';
 import { LocalStore, CloudStore, KEY_LOCAL, uid, norm } from './store.js';
-import { lerLinkNota, buscarPaginaNota, interpretarNota, vincularItens, nomeBonito, eanValido } from './nota.js';
+import { lerLinkNota, buscarPaginaNota, interpretarNota, interpretarTextoNota, vincularItens, nomeBonito, eanValido } from './nota.js';
 
 const CATEGORIAS = ['Mercearia', 'Bebidas', 'Limpeza', 'Higiene', 'Hortifrúti', 'Carnes/Frios', 'Congelados', 'Outros'];
 const KEY_MODO = 'despensa.modo';
@@ -253,7 +253,6 @@ const mesDe = (iso) => {
 
 function telaNotas() {
   const compras = [...S().purchases].sort((a, b) => String(b.date).localeCompare(String(a.date)));
-  const ativo = !!proxyNotas;
   const lista = compras.length
     ? `<div class="lista"><div class="card">${compras.map((c) => `
         <button type="button" class="row row-compra" data-act="ver-compra" data-id="${esc(c.id)}">
@@ -267,10 +266,8 @@ function telaNotas() {
   return `
     <header class="top"><div><h1>Notas</h1><p class="sub">${plural(compras.length, 'compra registrada', 'compras registradas')}</p></div></header>
     <div class="acoes" style="padding-top:0;padding-bottom:16px">
-      ${ativo
-        ? `<button class="btn primary" type="button" data-act="ler-nota">Ler QR Code da nota fiscal</button>
-           <button class="btn ghost" type="button" data-act="colar-link">Colar link da nota</button>`
-        : '<div class="aviso">' + ICON.alert + '<span>A leitura de notas ainda não foi ativada (falta publicar a função de consulta à Fazenda).</span></div>'}
+      <button class="btn primary" type="button" data-act="ler-nota">Ler QR Code da nota fiscal</button>
+      <button class="btn ghost" type="button" data-act="foto-nota">Fotografar a nota</button>
     </div>
     ${lista}`;
 }
@@ -388,25 +385,106 @@ async function processarQRNota(texto) {
   if (!$('#scanner').hidden) fecharLeitor();
   const existente = S().purchases.find((c) => c.id === info.chave);
   if (existente) { toast(`Essa nota já foi registrada (${fmtDataLonga(existente.date)}).`); abrirCompra(existente.id); return; }
-  if (!proxyNotas) { toast('A leitura de notas ainda não foi ativada.'); return; }
 
-  abrirSheet(`<div class="carregando-nota"><span class="res-ico neutro">${ICON.loading}</span><h2>Consultando a nota na Fazenda…</h2><p class="nota-local">Pode levar alguns segundos.</p></div>`);
-  let compra;
+  // 1º caminho: consulta automática na Fazenda. Se não der (SC exige validação humana), vai para a foto.
+  if (proxyNotas) {
+    abrirSheet(`<div class="carregando-nota"><span class="res-ico neutro">${ICON.loading}</span><h2>Consultando a nota na Fazenda…</h2><p class="nota-local">Pode levar alguns segundos.</p></div>`);
+    try {
+      const html = await buscarPaginaNota(proxyNotas, info.url);
+      if (!/SecurityVerify|valida[çc][ãa]o de seguran/i.test(html)) {
+        const compra = interpretarNota(html, info);
+        if (compra.items.length) { fecharSheet(); abrirConferencia(compra); return; }
+      }
+    } catch (e) { console.warn('consulta da nota', e); }
+    fecharSheet();
+  }
+  abrirFotoNota(info);
+}
+
+/* foto da nota */
+let fotoNota = null; // { info, textos: [], arquivos: n }
+
+function abrirFotoNota(info = null) {
+  fotoNota = { info, textos: [] };
+  abrirSheet(`
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <h2>Foto da nota</h2>
+      ${info ? '<div class="aviso">' + ICON.alert + '<span>A Fazenda não liberou a consulta automática desta nota. Vamos ler pela foto.</span></div>' : ''}
+      <ul class="dicas">
+        <li>Nota esticada, em cima de uma superfície lisa e com boa luz.</li>
+        <li>Enquadre da lista de itens até o "Valor total".</li>
+        <li>Nota comprida? Tire mais de uma foto, de cima para baixo.</li>
+      </ul>
+      <p class="nota-local">A foto é lida no próprio celular e descartada em seguida. O app guarda só os itens, a loja, a data e o total.</p>
+      <div class="sheet-acoes">
+        <label class="btn primary" for="foto-camera" style="cursor:pointer">Tirar foto</label>
+        <input id="foto-camera" type="file" accept="image/*" capture="environment" class="sr">
+        <label class="btn ghost" for="foto-galeria" style="cursor:pointer">Escolher da galeria</label>
+        <input id="foto-galeria" type="file" accept="image/*" multiple class="sr">
+        <button class="btn ghost" type="button" data-act="fechar-sheet">Cancelar</button>
+      </div>
+    </div>`);
+}
+
+// Junta os itens de várias fotos, tirando os repetidos na emenda entre uma foto e a próxima
+function juntarItens(listas) {
+  const chave = (it) => `${it.code}|${it.total}`;
+  const todos = [];
+  for (const lista of listas) {
+    let n = Math.min(todos.length, lista.length);
+    for (; n > 0; n--) {
+      if (todos.slice(-n).map(chave).join() === lista.slice(0, n).map(chave).join()) break;
+    }
+    todos.push(...lista.slice(n));
+  }
+  return todos;
+}
+
+async function processarFotos(arquivos) {
+  if (!fotoNota) fotoNota = { info: null, textos: [] };
+  abrirSheet(`<div class="carregando-nota"><span class="res-ico neutro">${ICON.loading}</span><h2 id="ocr-msg">Preparando o leitor…</h2>
+    <div class="progresso"><div id="ocr-barra"></div></div>
+    <p class="nota-local">Na primeira vez o leitor é baixado (cerca de 6 MB). Depois funciona até sem internet.</p></div>`);
   try {
-    const html = await buscarPaginaNota(proxyNotas, info.url);
-    compra = interpretarNota(html, info);
+    const { lerFotos } = await import('./ocr.js');
+    for (const arq of arquivos) {
+      const texto = await lerFotos([arq], (p, msg) => {
+        const b = $('#ocr-barra'); if (b) b.style.width = `${Math.round(p * 100)}%`;
+        const m = $('#ocr-msg'); if (m && msg) m.textContent = msg.replace('foto 1 de 1', `foto ${fotoNota.textos.length + 1}`);
+      });
+      fotoNota.textos.push(texto);
+    }
   } catch (e) {
+    console.error(e);
     fecharSheet();
-    abrirSheet(falhaNota(info, e.amigavel ? e.message : 'Não consegui ler a página da nota.'));
+    toast('Não consegui ler a foto. Tente de novo com mais luz.');
     return;
   }
-  if (!compra.items.length) {
-    fecharSheet();
-    abrirSheet(falhaNota(info, 'A Fazenda respondeu, mas não consegui identificar os itens desta nota.', compra));
-    conferencia = { compra, vinculos: [] };
-    return;
-  }
+  const textos = fotoNota.textos;
+  const compra = interpretarTextoNota(textos.join('\n'), fotoNota.info || {});
+  compra.items = juntarItens(textos.map((t) => interpretarTextoNota(t).items));
+  const soma = Math.round(compra.items.reduce((s, it) => s + it.total, 0) * 100) / 100;
+  compra.somaConfere = compra.totalEncontrado && Math.abs(compra.total - soma) <= 0.05;
+  if (!compra.totalEncontrado) compra.total = soma;
   fecharSheet();
+
+  const existente = S().purchases.find((c) => c.id === compra.id);
+  if (existente) { toast(`Essa nota já foi registrada (${fmtDataLonga(existente.date)}).`); abrirCompra(existente.id); return; }
+  if (!compra.items.length) {
+    conferencia = { compra, vinculos: [] };
+    abrirSheet(`
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <h2>Não encontrei os itens</h2>
+        <div class="aviso">${ICON.alert}<span>Não consegui identificar a lista de itens na foto. Tente outra foto, mais de perto e com mais luz.</span></div>
+        <div class="sheet-acoes">
+          <button class="btn primary" type="button" data-act="foto-nota-de-novo">Tirar outra foto</button>
+          ${compra.totalEncontrado ? `<button class="btn ghost" type="button" data-act="so-total">Registrar só o total (${brl(compra.total)})</button>` : ''}
+          <button class="btn ghost" type="button" data-act="fechar-sheet">Cancelar</button>
+        </div>
+      </div>`);
+    fotoNota.textos = [];
+    return;
+  }
   abrirConferencia(compra);
 }
 
@@ -463,6 +541,10 @@ function abrirConferencia(compra) {
         <span><strong>Dar entrada na despensa</strong><span class="info">Soma as quantidades e tira os itens da lista de compras</span></span>
         <input type="checkbox" id="conf-entrada" checked>
       </label>
+      <p class="nota-local">Desmarque se você já passou esses produtos no leitor de código de barras, para não contar duas vezes.</p>
+      ${compra.fonte === 'foto' && compra.totalEncontrado && !compra.somaConfere ? `
+        <div class="aviso">${ICON.alert}<span>A soma dos itens lidos (${brl(compra.items.reduce((s, it) => s + it.total, 0))}) não bate com o total da nota (${brl(compra.total)}). Confira os valores em laranja${compra.items.reduce((s, it) => s + it.total, 0) < compra.total ? ' ou adicione outra foto, se a nota for comprida' : ''}.</span></div>` : ''}
+      ${compra.fonte === 'foto' ? '<button class="btn ghost" type="button" data-act="mais-foto" style="min-height:44px">Adicionar outra foto desta nota</button>' : ''}
       <p class="nota-local">Confira os itens em laranja. Em cada item, escolha o produto da despensa, "Novo produto" ou "Não guardar". O app lembra a escolha nas próximas notas.</p>
       <div class="card">
         ${compra.items.map((it, i) => `
@@ -472,6 +554,12 @@ function abrirConferencia(compra) {
               <strong>${brl(it.total)}</strong>
             </div>
             <span class="info">${String(it.qty).replace('.', ',')} ${esc(it.unit)} × ${brl(it.unitPrice)} · <span class="st">${ROTULO[vinculos[i].status]}</span></span>
+            ${it.alertas && it.alertas.length ? `
+              <span class="alerta-item">${esc(it.alertas.join('; '))}</span>
+              ${it.alertas.some((a) => a.startsWith('quantidade')) ? `<div class="edita-item">
+                <label>Qtd <input id="conf-q-${i}" type="number" inputmode="decimal" step="0.001" min="0" value="${it.qty}"></label>
+                <label>Preço un. <input id="conf-p-${i}" type="number" inputmode="decimal" step="0.01" min="0" value="${it.unitPrice}"></label>
+              </div>` : ''}` : ''}
             <label class="sr" for="conf-${i}">Produto para ${esc(it.desc)}</label>
             <select id="conf-${i}" data-i="${i}">${opcoes(vinculos[i], it)}</select>
           </div>`).join('')}
@@ -488,6 +576,15 @@ function abrirConferencia(compra) {
 function salvarConferencia() {
   if (!conferencia) return;
   const { compra } = conferencia;
+  // valores corrigidos à mão nos itens com alerta
+  compra.items = compra.items.map((it, i) => {
+    const q = parseFloat($(`#conf-q-${i}`)?.value);
+    const p = parseFloat($(`#conf-p-${i}`)?.value);
+    if (!Number.isFinite(q) && !Number.isFinite(p)) return it;
+    const qty = Number.isFinite(q) && q > 0 ? q : it.qty;
+    const unitPrice = Number.isFinite(p) && p >= 0 ? Math.round(p * 100) / 100 : it.unitPrice;
+    return { ...it, qty, unitPrice, total: Math.round(qty * unitPrice * 100) / 100 };
+  });
   const decisoes = compra.items.map((it, i) => {
     const v = $(`#conf-${i}`)?.value || 'ignorar';
     if (v.startsWith('p:')) return { acao: 'produto', productId: v.slice(2) };
@@ -499,8 +596,11 @@ function salvarConferencia() {
   });
   const darEntrada = $('#conf-entrada')?.checked !== false;
   const snap = store.foto();
-  const r = store.registrarCompra(compra, decisoes, { darEntrada });
+  const { alertas, ...semAlertas } = { alertas: null, ...compra };
+  semAlertas.items = compra.items.map(({ alertas: _a, ...resto }) => resto);
+  const r = store.registrarCompra(semAlertas, decisoes, { darEntrada });
   conferencia = null;
+  fotoNota = null;
   fecharSheet();
   ui.tab = 'notas';
   render();
@@ -1200,6 +1300,15 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'salvar-compra': salvarConferencia(); break;
+    case 'foto-nota': abrirFotoNota(null); break;
+    case 'foto-nota-de-novo': abrirFotoNota(fotoNota?.info || null); break;
+    case 'mais-foto': {
+      const info = fotoNota?.info || null;
+      const textos = fotoNota?.textos || [];
+      abrirFotoNota(info);
+      fotoNota.textos = textos; // mantém as fotos já lidas
+      break;
+    }
     case 'so-total': salvarSoTotal(); break;
     case 'copiar-link': {
       try { await navigator.clipboard.writeText(el.dataset.link); toast('Link copiado.'); } catch { toast(el.dataset.link); }
@@ -1301,6 +1410,8 @@ document.addEventListener('change', (e) => {
     store.marcarItem(e.target.dataset.id, e.target.checked);
   } else if (e.target.id === 'importar' && e.target.files[0]) {
     importar(e.target.files[0]);
+  } else if ((e.target.id === 'foto-camera' || e.target.id === 'foto-galeria') && e.target.files.length) {
+    processarFotos([...e.target.files]);
   }
 });
 
@@ -1375,4 +1486,4 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 // Exposto só para testes
-window.__despensa = { processarCodigo, processarQRNota, abrirConferencia, get state() { return S(); }, get store() { return store; }, scan, nuvem };
+window.__despensa = { processarCodigo, processarQRNota, abrirConferencia, processarFotos, get state() { return S(); }, get store() { return store; }, scan, nuvem };

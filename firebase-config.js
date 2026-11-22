@@ -8,4 +8,4 @@ export const firebaseConfig = null;
 // Endereço da função que consulta a nota fiscal na Fazenda (etapa 4), ex.:
 //   'https://despensa-nfce.netlify.app/nfce'
 // Enquanto estiver null, a leitura de notas fica desativada.
-export const proxyNotas = null;
+export const proxyNotas = 'https://despensa-nfce.netlify.app/nfce';
