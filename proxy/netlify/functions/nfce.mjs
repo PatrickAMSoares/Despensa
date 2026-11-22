@@ -18,14 +18,23 @@ export default async (req) => {
     'Access-Control-Allow-Origin': ORIGENS.includes(origem) ? origem : ORIGENS[0],
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     Vary: 'Origin',
+    'Cache-Control': 'no-store', // cada link é uma nota diferente: nunca reaproveitar resposta
+    'Netlify-Vary': 'query',
   };
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (req.method !== 'GET') return new Response('Método não permitido', { status: 405, headers: cors });
 
+  const params = new URL(req.url).searchParams;
+  if (params.has('ping')) return new Response('ok', { headers: cors });
+  const diagnostico = params.has('diag'); // devolve só o status e o início da resposta da Fazenda
+
+  // Aceita o link completo (?url=) ou só o parâmetro p do QR Code de Santa Catarina (?p=chave|2|1|1|hash)
   let alvo;
-  try { alvo = new URL(new URL(req.url).searchParams.get('url') || ''); } catch { alvo = null; }
+  const p = params.get('p');
+  if (p && /^42\d{42}\|/.test(p)) alvo = new URL(`https://sat.sef.sc.gov.br/nfce/consulta?p=${p}`);
+  else { try { alvo = new URL(params.get('url') || ''); } catch { alvo = null; } }
   if (!alvo || !/^https?:$/.test(alvo.protocol) || !alvo.hostname.endsWith('.gov.br') || !/nfc-?e/i.test(alvo.href)) {
-    return new Response('Endereço de nota fiscal inválido', { status: 400, headers: cors });
+    return new Response(`Endereço de nota fiscal inválido${diagnostico ? `\nrecebido: ${req.url}` : ''}`, { status: diagnostico ? 200 : 400, headers: cors });
   }
 
   try {
@@ -45,12 +54,16 @@ export default async (req) => {
     let html;
     try { html = new TextDecoder(charsetDe(r.headers.get('content-type'), bytes)).decode(bytes); }
     catch { html = new TextDecoder('utf-8').decode(bytes); }
+    if (diagnostico) {
+      const texto = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 1500);
+      return new Response(`status da Fazenda: ${r.status}\nendereço final: ${r.url}\ntamanho: ${html.length}\ntem tabResult: ${/tabResult/.test(html)}\n\n${texto}`, { headers: { ...cors, 'Content-Type': 'text/plain; charset=utf-8' } });
+    }
     return new Response(html, {
       status: r.ok ? 200 : 502,
-      headers: { ...cors, 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': r.ok ? 'public, max-age=86400' : 'no-store' },
+      headers: { ...cors, 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
     });
   } catch (e) {
-    return new Response(`Falha ao consultar a Fazenda: ${e.name === 'AbortError' ? 'tempo esgotado' : e.message}`, { status: 504, headers: cors });
+    return new Response(`Falha ao consultar a Fazenda: ${e.name === 'AbortError' ? 'tempo esgotado' : e.message}${e.cause ? ` (${e.cause.code || e.cause.message})` : ''}`, { status: diagnostico ? 200 : 504, headers: cors });
   }
 };
 
